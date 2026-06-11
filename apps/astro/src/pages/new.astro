@@ -1,0 +1,10 @@
+---
+import Layout from "../components/layout/layout.astro";
+import { NewPipelineForm } from "../components/pipeline/new-pipeline-form";
+
+---
+
+<Layout>
+  <h1 class="text-2xl font-bold mb-6">New Pipeline</h1>
+  <NewPipelineForm client:load />
+</Layout>

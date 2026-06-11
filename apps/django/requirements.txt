@@ -1,0 +1,9 @@
+django>=5.0
+djangorestframework
+django-cors-headers
+docker>=7.0
+gunicorn
+pyyaml
+pytest>=8.0
+pytest-django>=4.0
+whitenoise>=6.0

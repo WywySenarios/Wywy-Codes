@@ -1,0 +1,23 @@
+---
+import Layout from "../../components/layout/layout.astro";
+import { FileExplorer } from "../../components/pipeline/file-explorer";
+
+export function getStaticPaths() {
+  return [{ params: { id: "_spa" } }];
+}
+
+const id = Astro.params.id!;
+const verbose = Astro.url.searchParams.get("verbose") === "1";
+---
+
+<Layout>
+  <h1 class="text-2xl font-bold mb-4">Files</h1>
+  <div class="mb-4 text-sm">
+    {verbose ? (
+      <><strong>Verbose view</strong> | <a href={`/${id}/files/`} class="text-blue-400 hover:underline">Curated view</a></>
+    ) : (
+      <><strong>Curated view</strong> | <a href={`/${id}/files/?verbose=1`} class="text-blue-400 hover:underline">Verbose view</a></>
+    )}
+  </div>
+  <FileExplorer pipelineId={id} verbose={verbose} client:only="react" />
+</Layout>

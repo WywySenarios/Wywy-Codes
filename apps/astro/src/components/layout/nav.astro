@@ -1,0 +1,22 @@
+---
+const currentPath = Astro.url.pathname;
+---
+
+<nav class="border-b border-gray-800 bg-gray-900">
+  <div class="max-w-6xl mx-auto px-6 py-3 flex items-center gap-6">
+    <a href="/" class="text-lg font-semibold text-gray-100 hover:text-white">
+      Orchestrator
+    </a>
+    <div class="flex gap-4 text-sm">
+      <a href="/" class={`hover:text-white ${currentPath === "/" ? "text-blue-400" : "text-gray-400"}`}>
+        Dashboard
+      </a>
+      <a href="/inbox/" class={`hover:text-white ${currentPath === "/inbox/" ? "text-blue-400" : "text-gray-400"}`}>
+        Inbox
+      </a>
+      <a href="/new/" class={`hover:text-white ${currentPath === "/new/" ? "text-blue-400" : "text-gray-400"}`}>
+        New Pipeline
+      </a>
+    </div>
+  </div>
+</nav>

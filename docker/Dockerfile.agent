@@ -1,0 +1,48 @@
+FROM ubuntu:22.04
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    build-essential \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python test framework
+RUN pip3 install --no-cache-dir pytest
+
+# Node.js test framework
+RUN npm install -g vitest prettier
+
+# Python formatter
+RUN pip3 install --no-cache-dir ruff
+
+# C formatter (clang-format)
+RUN apt-get update && apt-get install -y --no-install-recommends clang-format \
+    && rm -rf /var/lib/apt/lists/*
+
+# OpenCode binary — copied from host at build time
+# The build script must verify /usr/local/bin/opencode exists before docker build
+COPY opencode /usr/local/bin/opencode
+RUN chmod +x /usr/local/bin/opencode
+
+# Create wywy user (non-root)
+ARG CONTAINER_GID=1000
+RUN groupadd -g ${CONTAINER_GID} Wywy-Website && \
+    useradd -m -g Wywy-Website wywy
+
+# Create mount point directories
+RUN mkdir -p /state /artifacts /context /logs /workspace && \
+    chown -R wywy:Wywy-Website /state /artifacts /context /logs /workspace
+
+USER wywy
+WORKDIR /workspace
+
+# Default command — overridden per stage
+CMD ["echo", "Container ready"]

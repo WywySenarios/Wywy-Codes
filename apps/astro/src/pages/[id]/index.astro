@@ -1,0 +1,14 @@
+---
+import Layout from "../../components/layout/layout.astro";
+import { PipelineDetail } from "../../components/pipeline/pipeline-detail";
+
+export function getStaticPaths() {
+  return [{ params: { id: "_spa" } }];
+}
+
+const { id } = Astro.params;
+---
+
+<Layout>
+  <PipelineDetail pipelineId={id} client:only="react" />
+</Layout>

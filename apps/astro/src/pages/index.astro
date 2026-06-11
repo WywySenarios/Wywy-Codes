@@ -1,0 +1,9 @@
+---
+import Layout from "../components/layout/layout.astro";
+import { PipelineList } from "../components/pipeline/pipeline-list";
+---
+
+<Layout>
+  <h1 class="text-2xl font-bold mb-6">Pipelines</h1>
+  <PipelineList client:load />
+</Layout>

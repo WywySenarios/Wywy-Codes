@@ -1,0 +1,35 @@
+services:
+  django:
+    build:
+      context: ..
+      dockerfile: docker/django/Dockerfile
+      args:
+        CONTAINER_GID: 2523
+        DOCKER_GID: ${DOCKER_GID:-989}
+    env_file:
+      - /etc/Wywy-Website-Control/config/.env
+      - /etc/Wywy-Website-Control/config/.env.network
+      - /etc/Wywy-Website-Control/config/agentic/.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/workspace/Wywy-Website:/var/workspace/Wywy-Website
+      - /var/log/Wywy-Website/agentic:/var/log/Wywy-Website/agentic
+      - /var/lib/Wywy-Website/orchestrator:/var/lib/Wywy-Website/orchestrator
+      - /etc/Wywy-Website-Control:/etc/Wywy-Website-Control:ro
+      - /usr/local/Wywy-Website:/usr/local/Wywy-Website:ro
+    secrets:
+      - github-pat
+    environment:
+      - DJANGO_SETTINGS_MODULE=config.settings.prod
+    ports:
+      - "2524:8000"
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  github-pat:
+    file: ${SECRETS_DIR}/agentic/github-pat

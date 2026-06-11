@@ -1,0 +1,34 @@
+services:
+  django:
+    secrets: []
+    environment:
+      - DJANGO_DEBUG=true
+      - DJANGO_SETTINGS_MODULE=config.settings.dev
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    volumes:
+      - ../apps/django:/app:cached
+      - ../apps/astro/dist:/app/astro-dist:ro
+
+  astro:
+    build:
+      context: ..
+      dockerfile: docker/astro/Dockerfile
+      args:
+        CONTAINER_GID: 2523
+    env_file:
+      - /etc/Wywy-Website-Control/config/.env
+      - /etc/Wywy-Website-Control/config/.env.network
+      - /etc/Wywy-Website-Control/config/agentic/.env
+      - /etc/Wywy-Website-Control/config/.env.dev
+      - /etc/Wywy-Website-Control/config/agentic/.env.dev
+    environment:
+      - PUBLIC_AGENTIC_API_HOST=${AGENTIC_API_HOST:-lolipop}
+      - PUBLIC_AGENTIC_API_PORT=${AGENTIC_API_PORT:-2524}
+    command: npm run dev -- --host 0.0.0.0 --port 3000
+    volumes:
+      - ../apps/astro/astro.config.mjs:/app/astro.config.mjs:ro
+      - ../apps/astro/src:/app/src:rw
+    ports:
+      - "3000:3000"
+    depends_on:
+      - django

@@ -1,0 +1,5 @@
+services:
+  django:
+    environment:
+      - DJANGO_DEBUG=false
+    restart: unless-stopped
