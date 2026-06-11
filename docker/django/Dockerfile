@@ -33,7 +33,9 @@ RUN pip install --no-cache-dir \
     docker>=7.0 \
     gunicorn \
     pyyaml \
-    whitenoise>=6.0
+    whitenoise>=6.0 \
+    pytest \
+    pytest-django
 
 ARG CONTAINER_GID=2523
 ARG DOCKER_GID=989
@@ -56,6 +58,10 @@ COPY --from=astro-build /astro/dist /app/astro-dist
 ENV ASTRO_DIST=/app/astro-dist
 
 USER wywy
+
+RUN git config --global user.email "wywy@localhost" && \
+    git config --global user.name "Wywy" && \
+    git config --global init.defaultBranch master
 
 EXPOSE 8000
 CMD ["sh", "-c", "python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2"]

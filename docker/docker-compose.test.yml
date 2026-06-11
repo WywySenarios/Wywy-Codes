@@ -1,0 +1,21 @@
+services:
+  django:
+    restart: "no"
+    secrets: []
+    environment:
+      - ENVIRONMENT=test
+      - DJANGO_SETTINGS_MODULE=config.settings.base
+      - DEEPSEEK_API_KEY=
+      - OPENAI_API_KEY=
+      - ANTHROPIC_API_KEY=
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /var/log/Wywy-Website/agentic
+        set -o pipefail
+        python -m pytest /app/apps/orchestrator/tests/ -v --tb=short 2>&1 \
+          | tee /var/log/Wywy-Website/agentic/test-summary.log
+        exit $?
+  astro:
+    command: ["true"]
