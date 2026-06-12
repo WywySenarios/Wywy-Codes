@@ -480,3 +480,57 @@ class TestCopytreeErrorPropagation:
 
         with pytest.raises(PermissionError):
             orchestrator._create_workspace(pipeline_queued)
+
+
+class TestLockedSecrets:
+    def test_create_workspace_completes_despite_locked_secrets(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Copy completes and produces at least one copied entry despite
+        an inaccessible secrets/ directory being present inside the source.
+
+        _copy_source_tree passes an ``ignore`` callback to
+        shutil.copytree that filters out ``secrets/`` before the walk
+        descends into it, so the PermissionError on the locked dir is
+        never raised.
+        """
+        src = tmp_path / "Control"
+        src.mkdir()
+        (src / "AGENTS.md").write_text("hello")
+        (src / "config").mkdir()
+        (src / "config" / "settings.yaml").write_text("key: val")
+
+        locked = src / "secrets"
+        locked.mkdir()
+        (locked / "key.txt").write_text("secret!")
+        locked.chmod(0o000)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator.COPY_SOURCES",
+            [str(src)],
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._COPY_SOURCES_BASE",
+            str(tmp_path),
+        )
+
+        try:
+            orchestrator._create_workspace(pipeline_queued)
+
+            copies = (
+                Path(settings.WORKSPACE_ROOT)
+                / str(pipeline_queued.id)
+                / "copies"
+                / "Control"
+            )
+            assert copies.exists()
+            assert len(list(copies.iterdir())) > 0, (
+                "At least one file or directory must have been copied"
+            )
+        finally:
+            locked.chmod(0o755)

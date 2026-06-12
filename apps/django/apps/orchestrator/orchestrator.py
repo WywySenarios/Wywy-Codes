@@ -431,6 +431,24 @@ def _check_disk_space(workspace_root: str) -> None:
         )
 
 
+def _copy_source_tree(source: str, dest: str) -> None:
+    """Copy source directory to dest, skipping the known-inaccessible secrets/ directory.
+
+    shutil.copytree's ``ignore`` callback is invoked **before** the walk
+    descends into a subdirectory, so ``secrets/`` can be filtered out before
+    a PermissionError would be raised trying to list it.
+    """
+    def _ignore_fn(dir_path: str, contents: list[str]) -> list[str]:
+        return ["secrets"] if "secrets" in contents else []
+
+    shutil.copytree(
+        source, dest,
+        symlinks=True,
+        dirs_exist_ok=False,
+        ignore=_ignore_fn,
+    )
+
+
 def _create_workspace(pipeline: Pipeline) -> None:
     """Create workspace directory structure, copy source trees, and initialize state."""
     workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
@@ -456,11 +474,7 @@ def _create_workspace(pipeline: Pipeline) -> None:
         dest = copies_dir / rel_path
         dest.parent.mkdir(parents=True, exist_ok=True)
         _write_orchestrator_log(pipeline, "INFO", f"Copying {source}...")
-        shutil.copytree(
-            source, str(dest),
-            symlinks=True,
-            dirs_exist_ok=False,
-        )
+        _copy_source_tree(source, str(dest))
 
     for repo in REPO_CONFIG:
         repo_path = copies_dir / repo["mount"].lstrip("/")
