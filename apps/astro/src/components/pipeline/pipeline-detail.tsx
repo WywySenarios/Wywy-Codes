@@ -3,6 +3,7 @@ import { StatusBadge, StageProgress } from "./stage-progress";
 import { LogViewer } from "./log-viewer";
 import { Button } from "../ui/button";
 import { getPipeline, abortPipeline, type Pipeline, type PipelineStage } from "../../lib/api";
+import { getPipelineIdFromURL, pipelineRespondUrl, pipelineFilesUrl } from "../../lib/routes";
 
 export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
   const [pipeline, setPipeline] = useState<(Pipeline & { stages?: PipelineStage[] }) | null>(null);
@@ -72,7 +73,7 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
         </div>
         <div className="flex gap-2">
           {pipeline.user_input_pending && (
-            <a href={`/${pipeline.id}/respond/`}>
+            <a href={pipelineRespondUrl(pipeline.id)}>
               <Button variant="primary">Respond</Button>
             </a>
           )}
@@ -110,7 +111,7 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
 
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-semibold">Stages</h2>
-        <a href={`/${pipeline.id}/files/`} className="text-sm text-blue-400 hover:underline">
+        <a href={pipelineFilesUrl(pipeline.id)} className="text-sm text-blue-400 hover:underline">
           View Files
         </a>
       </div>
@@ -157,7 +158,4 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
   );
 }
 
-export function getPipelineIdFromURL(): string {
-  const parts = window.location.pathname.split("/").filter(Boolean);
-  return parts[0] || "";
-}
+

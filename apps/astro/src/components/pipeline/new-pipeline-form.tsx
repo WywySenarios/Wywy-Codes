@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { createPipeline } from "../../lib/api";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import { pipelineUrl } from "../../lib/routes";
 
 function toGitBranch(name: string): string {
   return name
@@ -36,7 +37,7 @@ export function NewPipelineForm() {
         setSubmitting(false);
         return;
       }
-      window.location.href = `/${result.id}/`;
+      window.location.href = pipelineUrl(result.id);
     } catch {
       setError("Failed to create pipeline. Please try again.");
       setSubmitting(false);

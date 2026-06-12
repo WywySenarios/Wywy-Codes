@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { respondToPipeline, getPipeline, type AgentRequest, type Pipeline } from "../../lib/api";
 import { Button } from "../ui/button";
 import { Textarea } from "../ui/textarea";
+import { getPipelineIdFromURL, pipelineUrl, pipelineFilesUrl } from "../../lib/routes";
 
 export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
   const [request, setRequest] = useState<AgentRequest | null>(null);
@@ -63,7 +64,7 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
     return (
       <div className="bg-yellow-900/30 border border-yellow-700 rounded-lg p-6 text-center">
         <p className="text-yellow-400">This pipeline is not awaiting user input.</p>
-        <a href={`/${id}/`} className="text-blue-400 hover:underline mt-2 inline-block">Back to pipeline</a>
+        <a href={pipelineUrl(id)} className="text-blue-400 hover:underline mt-2 inline-block">Back to pipeline</a>
       </div>
     );
   }
@@ -72,7 +73,7 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
     return (
       <div className="bg-green-900/30 border border-green-700 rounded-lg p-6 text-center">
         <p className="text-green-400 mb-3">Response submitted successfully.</p>
-        <a href={`/${id}/`} className="text-blue-400 hover:underline">Back to pipeline</a>
+        <a href={pipelineUrl(id)} className="text-blue-400 hover:underline">Back to pipeline</a>
       </div>
     );
   }
@@ -126,7 +127,7 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
           {request.context_refs.map((ref, i) => (
             <div key={i} className="text-xs text-gray-500">
               {ref.type === "file" && ref.path ? (
-                <a href={`/${id}/files/?path=${ref.path}`} className="text-blue-400 hover:underline">
+                <a href={pipelineFilesUrl(id, { path: ref.path })} className="text-blue-400 hover:underline">
                   {ref.path}
                   {ref.line_start ? `:${ref.line_start}` : ""}
                   {ref.line_end ? `-${ref.line_end}` : ""}
@@ -151,7 +152,4 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
   );
 }
 
-function getPipelineIdFromURL(): string {
-  const parts = window.location.pathname.split("/").filter(Boolean);
-  return parts[0] || "";
-}
+

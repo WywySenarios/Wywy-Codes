@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { StatusBadge } from "./stage-progress";
 import { listBlockedPipelines, type Pipeline } from "../../lib/api";
+import { pipelineUrl, pipelineRespondUrl } from "../../lib/routes";
 
 export function Inbox() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -37,7 +38,7 @@ export function Inbox() {
         <div key={p.id} className="bg-yellow-900/20 border border-yellow-800 rounded-lg p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
-              <a href={`/${p.id}/`} className="text-base font-semibold text-gray-100 hover:text-blue-400">
+              <a href={pipelineUrl(p.id)} className="text-base font-semibold text-gray-100 hover:text-blue-400">
                 {p.invocation_name}
               </a>
               <StatusBadge status={p.status} />
@@ -58,7 +59,7 @@ export function Inbox() {
             <span className="text-xs text-gray-600">
               Waiting since: {new Date(p.updated_at).toISOString().replace('T', ' ').slice(0, 19)}
             </span>
-            <a href={`/${p.id}/respond/`} className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium bg-yellow-600 hover:bg-yellow-700 text-white transition-colors">
+            <a href={pipelineRespondUrl(p.id)} className="inline-flex items-center px-3 py-1.5 rounded-lg text-sm font-medium bg-yellow-600 hover:bg-yellow-700 text-white transition-colors">
               Respond
             </a>
           </div>

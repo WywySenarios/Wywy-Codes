@@ -8,15 +8,20 @@ export function getStaticPaths() {
 
 const id = Astro.params.id!;
 const verbose = Astro.url.searchParams.get("verbose") === "1";
+// Preserve all query params except verbose for toggle links
+const baseParams = new URLSearchParams(Astro.url.search);
+baseParams.delete("verbose");
+const baseQuery = baseParams.toString();
+const queryPrefix = baseQuery ? `?${baseQuery}&` : "?";
 ---
 
 <Layout>
   <h1 class="text-2xl font-bold mb-4">Files</h1>
   <div class="mb-4 text-sm">
     {verbose ? (
-      <><strong>Verbose view</strong> | <a href={`/${id}/files/`} class="text-blue-400 hover:underline">Curated view</a></>
+      <><strong>Verbose view</strong> | <a href={`/${id}/files/${queryPrefix}`} class="text-blue-400 hover:underline">Curated view</a></>
     ) : (
-      <><strong>Curated view</strong> | <a href={`/${id}/files/?verbose=1`} class="text-blue-400 hover:underline">Verbose view</a></>
+      <><strong>Curated view</strong> | <a href={`/${id}/files/${queryPrefix}verbose=1`} class="text-blue-400 hover:underline">Verbose view</a></>
     )}
   </div>
   <FileExplorer pipelineId={id} verbose={verbose} client:only="react" />

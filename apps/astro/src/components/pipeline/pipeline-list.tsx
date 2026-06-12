@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { StatusBadge, StageProgress } from "./stage-progress";
 import { listPipelines, type Pipeline } from "../../lib/api";
+import { pipelineUrl, pipelineRespondUrl } from "../../lib/routes";
 
 export function PipelineList() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
@@ -39,7 +40,7 @@ export function PipelineList() {
         <div key={p.id} className="bg-gray-900 border border-gray-800 rounded-lg p-4 hover:border-gray-700 transition-colors">
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-3">
-              <a href={`/${p.id}/`} className="text-base font-semibold text-gray-100 hover:text-blue-400">
+              <a href={pipelineUrl(p.id)} className="text-base font-semibold text-gray-100 hover:text-blue-400">
                 {p.invocation_name}
               </a>
               <StatusBadge status={p.status} />
@@ -55,7 +56,7 @@ export function PipelineList() {
             <span>Stage: {p.current_stage || "-"}</span>
             <span>Iterations: {p.iteration_count}</span>
             {p.user_input_pending && (
-              <a href={`/${p.id}/respond/`} className="text-yellow-400 hover:underline font-medium">
+              <a href={pipelineRespondUrl(p.id)} className="text-yellow-400 hover:underline font-medium">
                 Needs input
               </a>
             )}

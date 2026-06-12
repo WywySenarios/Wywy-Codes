@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { getFileContent, listFiles, type FileListing } from "../../lib/api";
+import { getPipelineIdFromURL } from "../../lib/routes";
 
 export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; verbose: boolean }) {
   const [files, setFiles] = useState<FileListing | null>(null);
@@ -124,7 +125,4 @@ export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; ver
   );
 }
 
-export function getPipelineIdFromURL(): string {
-  const parts = window.location.pathname.split("/").filter(Boolean);
-  return parts[0] || "";
-}
+
