@@ -38,10 +38,11 @@ RUN pip install --no-cache-dir \
     pytest-django
 
 ARG CONTAINER_GID=2523
+ARG CONTAINER_UID=25233
 ARG DOCKER_GID=989
 RUN groupadd -g ${CONTAINER_GID} Wywy-Website && \
     groupadd -g ${DOCKER_GID} docker_host && \
-    useradd -m -g Wywy-Website -G docker_host wywy
+    useradd -m -u ${CONTAINER_UID} -g Wywy-Website -G docker_host wywy
 
 RUN mkdir -p /var/log/Wywy-Website/agentic && \
     mkdir -p /var/lib/Wywy-Website/orchestrator && \
@@ -64,4 +65,4 @@ RUN git config --global user.email "wywy@localhost" && \
     git config --global init.defaultBranch master
 
 EXPOSE 8000
-CMD ["sh", "-c", "python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2"]
+CMD ["sh", "-c", "umask 002 && python manage.py check_db_writable && python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2"]

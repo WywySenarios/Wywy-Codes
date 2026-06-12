@@ -20,6 +20,7 @@ DEBUG: bool = environ.get("DJANGO_DEBUG", "false").lower() == "true"
 _AGENTIC_API_HOST: str = environ.get("AGENTIC_API_HOST", "")
 _AGENTIC_WEBSITE_HOST: str = environ.get("AGENTIC_WEBSITE_HOST", "")
 _AGENTIC_WEBSITE_PORT: str = environ.get("AGENTIC_WEBSITE_PORT", "3000")
+_AGENTIC_WEBSITE_DEV_PORT: str = environ.get("AGENTIC_WEBSITE_DEV_PORT", "3000")
 _AGENTIC_API_DOCKER_HOST: str = environ.get("AGENTIC_API_DOCKER_HOST", "django")
 
 ALLOWED_HOSTS: list[str] = ["localhost", "127.0.0.1", _AGENTIC_API_DOCKER_HOST]
@@ -40,14 +41,17 @@ MIDDLEWARE: list[str] = [
 ]
 
 CORS_ALLOWED_ORIGINS: list[str] = [
+    f"http://localhost:{_AGENTIC_WEBSITE_PORT}",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    f"http://127.0.0.1:{_AGENTIC_WEBSITE_PORT}",
     f"http://{_AGENTIC_API_DOCKER_HOST}:3000",
 ]
 if _AGENTIC_WEBSITE_HOST:
     CORS_ALLOWED_ORIGINS.extend([
         f"https://{_AGENTIC_WEBSITE_HOST}",
         f"http://{_AGENTIC_WEBSITE_HOST}:{_AGENTIC_WEBSITE_PORT}",
+        f"http://{_AGENTIC_WEBSITE_HOST}:{_AGENTIC_WEBSITE_DEV_PORT}",
         f"http://{_AGENTIC_WEBSITE_HOST}",
     ])
 
@@ -126,6 +130,7 @@ ASTRO_DIST: str = environ.get(
     str(BASE_DIR.parent.parent / "apps" / "astro" / "dist"),
 )
 STATIC_URL: str = "/"
+MEDIA_URL: str = "/media/"
 STATICFILES_DIRS: list[str] = [ASTRO_DIST]
 STATIC_ROOT: str = ASTRO_DIST
 WHITENOISE_INDEX_FILE: bool = True

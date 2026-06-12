@@ -4,7 +4,7 @@ services:
     environment:
       - DJANGO_DEBUG=true
       - DJANGO_SETTINGS_MODULE=config.settings.dev
-    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
+    command: sh -c "umask 002 && python manage.py check_db_writable && python manage.py migrate && python manage.py runserver 0.0.0.0:8000"
     volumes:
       - ../apps/django:/app:cached
       - ../apps/astro/dist:/app/astro-dist:ro

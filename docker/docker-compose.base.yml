@@ -5,6 +5,7 @@ services:
       dockerfile: docker/django/Dockerfile
       args:
         CONTAINER_GID: 2523
+        CONTAINER_UID: 25233
         DOCKER_GID: ${DOCKER_GID:-989}
     env_file:
       - /etc/Wywy-Website-Control/config/.env
