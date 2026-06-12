@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from django.conf import settings
+from django.test import override_settings
 
 from apps.orchestrator import orchestrator
 from apps.orchestrator.models import Pipeline, PipelineStage
@@ -354,13 +355,14 @@ class TestOpencodeServerLifecycle:
         temp_log_root: Path,
         monkeypatch: MonkeyPatch,
     ) -> None:
-        pipeline = Pipeline.objects.create(
-            invocation_name="health-fail", description="test", status="queued",
-        )
-        monkeypatch.setattr(orchestrator, "_opencode_get",
-                           lambda p, path, timeout=10: (_ for _ in ()).throw(OSError("refused")))
-        monkeypatch.setattr(orchestrator, "_get_server_url",
-                           lambda p: "http://s:4096")
+        with override_settings(OPENCODE_SERVER_HEALTH_RETRIES=3, OPENCODE_SERVER_HEALTH_INTERVAL=0.01):
+            pipeline = Pipeline.objects.create(
+                invocation_name="health-fail", description="test", status="queued",
+            )
+            monkeypatch.setattr(orchestrator, "_opencode_get",
+                            lambda p, path, timeout=10: (_ for _ in ()).throw(OSError("refused")))
+            monkeypatch.setattr(orchestrator, "_get_server_url",
+                            lambda p: "http://s:4096")
 
-        with pytest.raises(RuntimeError, match="health"):
-            orchestrator._wait_for_server_health(pipeline)
+            with pytest.raises(RuntimeError, match="health"):
+                orchestrator._wait_for_server_health(pipeline)

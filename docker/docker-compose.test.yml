@@ -9,13 +9,11 @@ services:
       - OPENAI_API_KEY=
       - ANTHROPIC_API_KEY=
     command:
-      - sh
+      - bash
       - -c
       - |
-        mkdir -p /var/log/Wywy-Website/agentic
-        set -o pipefail
         python -m pytest /app/apps/orchestrator/tests/ -v --tb=short 2>&1 \
-          | tee /var/log/Wywy-Website/agentic/test-summary.log
-        exit $?
+          | tee /var/log/Wywy-Website/agentic/test-summary.log 2>/dev/null
+        exit $${PIPESTATUS[0]}
   astro:
     command: ["true"]
