@@ -2,6 +2,7 @@ django>=5.0
 djangorestframework
 django-cors-headers
 docker>=7.0
+requests>=2.31
 gunicorn
 pyyaml
 pytest>=8.0

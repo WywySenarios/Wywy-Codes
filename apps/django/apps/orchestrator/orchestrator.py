@@ -6,11 +6,13 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, TypedDict
 
 import docker
+import requests
 from docker.models.containers import Container
 from django.conf import settings
 from django.db import transaction
@@ -79,6 +81,7 @@ _COPY_SOURCES_BASE: str = "/"
 MIN_DISK_SPACE_GB: int = 10
 
 _wake_event = threading.Event()
+_opencode_server_containers: dict[str, Container] = {}
 
 
 def _previous_stage_name(stage_name: str) -> str:
@@ -187,6 +190,8 @@ def start_pipeline(pipeline: Pipeline) -> None:
 
     try:
         _create_workspace(pipeline)
+        _start_opencode_server(pipeline)
+        _wait_for_server_health(pipeline)
     except OSError as exc:
         _teardown_workspace(pipeline)
         pipeline.status = "failed"
@@ -220,6 +225,8 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
 
     try:
         _create_workspace(pipeline)
+        _start_opencode_server(pipeline)
+        _wait_for_server_health(pipeline)
     except OSError as exc:
         _teardown_workspace(pipeline)
         pipeline.status = "failed"
@@ -392,6 +399,7 @@ def _complete_pipeline(pipeline: Pipeline) -> None:
         _create_pr(pipeline)
     except Exception:
         logger.exception("PR creation failed for pipeline %s", pipeline.id)
+    _stop_opencode_server(pipeline)
     _teardown_workspace(pipeline)
 
 
@@ -400,6 +408,7 @@ def _teardown_workspace(pipeline: Pipeline) -> None:
 
     Logs survive independently at /var/log/Wywy-Website/agentic/{pipeline_id}/.
     """
+    _stop_opencode_server(pipeline)
     workspace_dir = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
     if workspace_dir.exists():
         _write_orchestrator_log(pipeline, "INFO", "Tearing down workspace")
@@ -586,102 +595,15 @@ def _create_stages(pipeline: Pipeline) -> None:
 
 
 def _spawn_agent_container(pipeline: Pipeline, stage: PipelineStage) -> tuple[int, bool]:
-    """Start an agent container via Docker SDK and wait for completion.
-    
-    Returns (exit_code, is_blocked).
+    """Execute a stage via the opencode HTTP server.
+
+    Delegates to _run_stage_via_server for the actual HTTP communication.
+    Kept as a separate function so existing test mocks on
+    _spawn_agent_container continue to work.
     """
-    workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
-    log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
-
-    volumes: dict[str, dict] = {}
-    for repo in REPO_CONFIG:
-        repo_path = workspace / "copies" / repo["mount"].lstrip("/")
-        if repo_path.exists():
-            volumes[str(repo_path)] = {"bind": repo["mount"], "mode": "rw"}
-    volumes.update({
-        str(workspace / "state"): {"bind": "/state", "mode": "rw"},
-        str(workspace / "artifacts"): {"bind": "/artifacts", "mode": "rw"},
-        str(workspace / "context"): {"bind": "/context", "mode": "rw"},
-        str(workspace / ".opencode"): {"bind": "/workspace/.opencode", "mode": "ro"},
-        str(log_dir): {"bind": "/logs", "mode": "rw"},
-    })
-
-    client = docker.from_env()
-    container = client.containers.run(
-        image=settings.AGENT_IMAGE,
-        command=["opencode", "run", "--print-logs", f"Stage: {stage.name}. Write to /state/state.json to report your progress."],
-        environment={
-            "STAGE": stage.name,
-            "PIPELINE_ID": str(pipeline.id),
-            "BRANCH_NAME": pipeline.invocation_name,
-            "HOME": "/home/wywy",
-            "PREVIOUS_STAGE": _previous_stage_name(stage.name),
-            "DEEPSEEK_API_KEY": getattr(settings, "AGENT_DEEPSEEK_API_KEY", ""),
-            "OPENAI_API_KEY": getattr(settings, "AGENT_OPENAI_API_KEY", ""),
-            "ANTHROPIC_API_KEY": getattr(settings, "AGENT_ANTHROPIC_API_KEY", ""),
-            "OPENCODE_API_KEY": getattr(settings, "AGENT_OPENCODE_API_KEY", ""),
-        },
-        volumes=volumes,
-        user=f":{settings.AGENT_CONTAINER_GID}",
-        detach=True,
-        network=settings.AGENT_NETWORK,
-    )
-
-    exit_code = 1
-    try:
-        result = container.wait(timeout=settings.PIPELINE_TIMEOUT_SECONDS)
-        exit_code = result.get("StatusCode", 1)
-    except docker.errors.DockerException as e:
-        _write_orchestrator_log(
-            pipeline, "ERROR",
-            f"Container wait failed for {stage.name}: {e}",
-        )
-    finally:
-        _capture_container_logs(pipeline, stage, container, exit_code)
-        try:
-            container.remove(force=True)
-        except docker.errors.DockerException:
-            logger.warning(
-                "Failed to remove container %s for pipeline %s",
-                container.short_id, pipeline.id,
-            )
-
-    if exit_code != 0:
-        return exit_code, False
-
-    is_blocked = _check_blocked_state(pipeline, stage)
-    return exit_code, is_blocked
+    return _run_stage_via_server(pipeline, stage)
 
 
-def _capture_container_logs(pipeline: Pipeline, stage: PipelineStage, container: Container, exit_code: int) -> None:
-    """Capture container stdout/stderr and write to the pipeline log directory."""
-    try:
-        raw = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
-    except Exception:
-        logger.warning("Failed to retrieve container logs for stage %s", stage.name)
-        raw = "(failed to retrieve container logs)"
-
-    log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{stage.name}.log"
-    try:
-        with open(log_path, "a") as f:
-            f.write(raw)
-            if not raw.endswith("\n"):
-                f.write("\n")
-    except Exception:
-        logger.warning(
-            "Failed to write stage log %s for pipeline %s",
-            log_path, pipeline.id,
-        )
-
-    if exit_code != 0:
-        tail = raw[-2000:] if len(raw) > 2000 else raw
-        _write_orchestrator_log(
-            pipeline,
-            "ERROR",
-            f"Stage {stage.name} exited {exit_code}: {tail}",
-        )
 
 
 def _check_blocked_state(pipeline: Pipeline, stage: PipelineStage) -> bool:
@@ -697,6 +619,182 @@ def _check_blocked_state(pipeline: Pipeline, stage: PipelineStage) -> bool:
                     pipeline.save(update_fields=["user_input_request"])
                 return True
     return False
+
+
+# ── OpenCode server pipeline ─────────────────────────────────────────────
+
+def _server_container_name(pipeline_id: str) -> str:
+    return f"pipeline-{pipeline_id}"
+
+
+def _get_server_url(pipeline: Pipeline) -> str:
+    container = _opencode_server_containers.get(str(pipeline.id))
+    if container is None:
+        raise RuntimeError(f"No opencode server for pipeline {pipeline.id}")
+    container.reload()
+    networks = container.attrs["NetworkSettings"]["Networks"]
+    ip = networks[settings.AGENT_NETWORK]["IPAddress"]
+    return f"http://{ip}:{settings.OPENCODE_SERVER_PORT}"
+
+
+def _opencode_post(pipeline: Pipeline, path: str, json: dict | None = None,
+                   timeout: int | None = None) -> dict:
+    base = _get_server_url(pipeline)
+    url = f"{base}{path}"
+    auth = None
+    if settings.OPENCODE_SERVER_PASSWORD:
+        auth = (settings.OPENCODE_SERVER_USERNAME, settings.OPENCODE_SERVER_PASSWORD)
+    resp = requests.post(url, json=json, auth=auth,
+                         timeout=timeout or settings.PIPELINE_TIMEOUT_SECONDS)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _opencode_get(pipeline: Pipeline, path: str, timeout: int = 10) -> dict:
+    base = _get_server_url(pipeline)
+    url = f"{base}{path}"
+    auth = None
+    if settings.OPENCODE_SERVER_PASSWORD:
+        auth = (settings.OPENCODE_SERVER_USERNAME, settings.OPENCODE_SERVER_PASSWORD)
+    resp = requests.get(url, auth=auth, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _start_opencode_server(pipeline: Pipeline) -> None:
+    """Start a persistent opencode serve container for the pipeline."""
+    key = str(pipeline.id)
+    if key in _opencode_server_containers:
+        raise RuntimeError(f"Pipeline {pipeline.id} already has a server container")
+    workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
+    log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
+
+    volumes: dict[str, dict] = {}
+    for repo in REPO_CONFIG:
+        repo_path = workspace / "copies" / repo["mount"].lstrip("/")
+        if repo_path.exists():
+            volumes[str(repo_path)] = {"bind": repo["mount"], "mode": "rw"}
+    volumes.update({
+        str(workspace / "state"): {"bind": "/state", "mode": "rw"},
+        str(workspace / "artifacts"): {"bind": "/artifacts", "mode": "rw"},
+        str(workspace / "context"): {"bind": "/context", "mode": "rw"},
+        str(log_dir): {"bind": "/logs", "mode": "rw"},
+    })
+
+    client = docker.from_env()
+    container = client.containers.run(
+        image=settings.AGENT_IMAGE,
+        command=[
+            "opencode", "serve",
+            "--port", str(settings.OPENCODE_SERVER_PORT),
+            "--hostname", settings.OPENCODE_SERVER_HOSTNAME,
+        ],
+        environment={
+            "PIPELINE_ID": str(pipeline.id),
+            "HOME": "/home/wywy",
+            "OPENCODE_SERVER_PASSWORD": settings.OPENCODE_SERVER_PASSWORD,
+            "OPENCODE_API_KEY": getattr(settings, "AGENT_OPENCODE_API_KEY", ""),
+            "DEEPSEEK_API_KEY": getattr(settings, "AGENT_DEEPSEEK_API_KEY", ""),
+            "OPENAI_API_KEY": getattr(settings, "AGENT_OPENAI_API_KEY", ""),
+            "ANTHROPIC_API_KEY": getattr(settings, "AGENT_ANTHROPIC_API_KEY", ""),
+        },
+        volumes=volumes,
+        name=_server_container_name(str(pipeline.id)),
+        user=f":{settings.AGENT_CONTAINER_GID}",
+        detach=True,
+        network=settings.AGENT_NETWORK,
+    )
+    _opencode_server_containers[key] = container
+    _write_orchestrator_log(pipeline, "INFO", "Opencode server container started")
+
+
+def _stop_opencode_server(pipeline: Pipeline) -> None:
+    """Stop and remove the opencode serve container for the pipeline."""
+    key = str(pipeline.id)
+    container = _opencode_server_containers.pop(key, None)
+    if container is None:
+        return
+    _capture_server_logs(pipeline, container)
+    try:
+        container.remove(force=True)
+    except docker.errors.DockerException:
+        logger.warning("Failed to remove server container for pipeline %s", pipeline.id)
+    _write_orchestrator_log(pipeline, "INFO", "Opencode server container stopped")
+
+
+def _wait_for_server_health(pipeline: Pipeline) -> None:
+    """Poll /global/health until the server responds 200."""
+    for i in range(settings.OPENCODE_SERVER_HEALTH_RETRIES):
+        try:
+            _opencode_get(pipeline, "/global/health", timeout=5)
+            _write_orchestrator_log(pipeline, "INFO", "Opencode server healthy")
+            return
+        except Exception:
+            if i < settings.OPENCODE_SERVER_HEALTH_RETRIES - 1:
+                time.sleep(settings.OPENCODE_SERVER_HEALTH_INTERVAL)
+    raise RuntimeError(
+        f"Opencode server for pipeline {pipeline.id} failed health check "
+        f"after {settings.OPENCODE_SERVER_HEALTH_RETRIES} retries"
+    )
+
+
+def _write_log_file(pipeline: Pipeline, filename: str, content: str) -> None:
+    """Append content to a log file in the pipeline log directory."""
+    log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / filename
+    try:
+        with open(log_path, "a") as f:
+            f.write(content)
+            if not content.endswith("\n"):
+                f.write("\n")
+    except Exception:
+        logger.warning("Failed to write log %s for pipeline %s", filename, pipeline.id)
+
+
+def _capture_server_logs(pipeline: Pipeline, container: Container) -> None:
+    """Capture server container stdout/stderr to the pipeline log directory."""
+    try:
+        raw = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
+    except Exception:
+        logger.warning("Failed to retrieve server logs for pipeline %s", pipeline.id)
+        return
+    _write_log_file(pipeline, "server.log", raw)
+
+
+def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int, bool]:
+    """Execute a pipeline stage via the opencode HTTP server."""
+    # Create session
+    session = _opencode_post(pipeline, "/session", json={"title": stage.name})
+    session_id = session["id"]
+
+    # Send prompt and wait for response
+    _opencode_post(
+        pipeline,
+        f"/session/{session_id}/message",
+        json={
+            "parts": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"Stage: {stage.name}. "
+                        f"Write to /state/state.json to report your progress. "
+                        f"Set stages.{stage.name}.status to 'completed' when done."
+                    ),
+                }
+            ]
+        },
+    )
+
+    # Capture session messages as stage log
+    try:
+        messages = _opencode_get(pipeline, f"/session/{session_id}/message")
+        _write_log_file(pipeline, f"{stage.name}.log", json.dumps(messages, indent=2))
+    except Exception:
+        logger.warning("Failed to capture session messages for stage %s", stage.name)
+
+    is_blocked = _check_blocked_state(pipeline, stage)
+    return 0, is_blocked
 
 
 def _run_formatters(pipeline: Pipeline) -> None:
