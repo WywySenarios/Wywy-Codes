@@ -534,3 +534,51 @@ class TestLockedSecrets:
             )
         finally:
             locked.chmod(0o755)
+
+
+class TestLockedNonSecrets:
+    def test_locked_non_secrets_dir_causes_failure(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A locked directory NOT named 'secrets' must cause the pipeline to fail.
+
+        Only ``secrets/`` is a known, expected inaccessible directory that
+        the copy must silently skip.  Any other locked subdirectory is a
+        defect in the filesystem permissions strategy — the install scripts
+        should have ensured all source trees are readable by group 2523.
+        Silently skipping such a directory would hide a real problem.
+
+        Regression test: _create_workspace must raise when it encounters an
+        inaccessible directory that the _ignore_fn does not filter.
+        """
+        src = tmp_path / "Control"
+        src.mkdir()
+        (src / "AGENTS.md").write_text("hello")
+        (src / "config").mkdir()
+        (src / "config" / "settings.yaml").write_text("key: val")
+
+        locked = src / "credentials"
+        locked.mkdir()
+        (locked / "token.txt").write_text("secret!")
+        locked.chmod(0o000)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator.COPY_SOURCES",
+            [str(src)],
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._COPY_SOURCES_BASE",
+            str(tmp_path),
+        )
+
+        try:
+            with pytest.raises(Exception):
+                orchestrator._create_workspace(pipeline_queued)
+        finally:
+            locked.chmod(0o755)
+

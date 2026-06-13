@@ -43,11 +43,11 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
   if (loading) {
     return (
       <div className="space-y-6 animate-pulse">
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <div className="h-6 bg-gray-800 rounded w-1/3 mb-3" />
-          <div className="h-4 bg-gray-800 rounded w-3/4" />
+        <div className="bg-card border border-border p-4">
+          <div className="h-6 bg-muted rounded w-1/3 mb-3" />
+          <div className="h-4 bg-muted rounded w-3/4" />
         </div>
-        <div className="h-24 bg-gray-800 rounded-lg" />
+        <div className="h-24 bg-muted rounded-lg" />
       </div>
     );
   }
@@ -84,18 +84,18 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
-      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+      <div className="bg-card border border-border p-4">
         <h2 className="text-lg font-semibold mb-2">{request.summary}</h2>
         {request.question && (
-          <div className="text-sm text-gray-300 whitespace-pre-wrap">{request.question}</div>
+          <div className="text-sm text-foreground whitespace-pre-wrap">{request.question}</div>
         )}
       </div>
 
       {request.options && request.options.length > 0 && (
         <div className="space-y-3">
-          <h3 className="text-sm font-medium text-gray-400">Options</h3>
+          <h3 className="text-sm font-medium text-muted-foreground">Options</h3>
           {request.options.map((opt) => (
-            <label key={opt.id} className="flex items-start gap-3 p-3 bg-gray-900 rounded-lg border border-gray-800 hover:border-gray-700 cursor-pointer">
+            <label key={opt.id} className="flex items-start gap-3 p-3 bg-card border border-border hover:border-border cursor-pointer">
               <input
                 type="radio"
                 name="selected_option"
@@ -105,27 +105,29 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
                 className="mt-0.5 accent-blue-500"
               />
               <div>
-                <div className="text-sm font-medium text-gray-200">{opt.label}</div>
-                {opt.description && <div className="text-xs text-gray-500 mt-1">{opt.description}</div>}
+                <div className="text-sm font-medium text-foreground">{opt.label}</div>
+                {opt.description && <div className="text-xs text-muted-foreground mt-1">{opt.description}</div>}
               </div>
             </label>
           ))}
         </div>
       )}
 
-      <Textarea
-        label="Your Response"
-        placeholder="Provide additional guidance or context..."
-        value={freeform}
-        onChange={(e) => setFreeform(e.target.value)}
-        rows={4}
-      />
+      <div className="flex flex-col gap-1">
+        <label className="text-sm font-medium text-foreground">Your Response</label>
+        <Textarea
+          placeholder="Provide additional guidance or context..."
+          value={freeform}
+          onChange={(e) => setFreeform(e.target.value)}
+          rows={4}
+        />
+      </div>
 
       {request.context_refs && request.context_refs.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-sm font-medium text-gray-400">Related Context</h3>
+          <h3 className="text-sm font-medium text-muted-foreground">Related Context</h3>
           {request.context_refs.map((ref, i) => (
-            <div key={i} className="text-xs text-gray-500">
+            <div key={i} className="text-xs text-muted-foreground">
               {ref.type === "file" && ref.path ? (
                 <a href={pipelineFilesUrl(id, { path: ref.path })} className="text-blue-400 hover:underline">
                   {ref.path}
@@ -133,9 +135,9 @@ export function ResponseForm({ pipelineId }: { pipelineId?: string }) {
                   {ref.line_end ? `-${ref.line_end}` : ""}
                 </a>
               ) : (
-                <span className="text-gray-500">[{ref.type}]</span>
+                <span className="text-muted-foreground">[{ref.type}]</span>
               )}
-              {ref.note && <span className="ml-2 text-gray-600">— {ref.note}</span>}
+              {ref.note && <span className="ml-2 text-muted-foreground">— {ref.note}</span>}
             </div>
           ))}
         </div>

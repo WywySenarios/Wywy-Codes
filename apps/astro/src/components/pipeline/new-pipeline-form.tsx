@@ -47,7 +47,7 @@ export function NewPipelineForm() {
   return (
     <form onSubmit={handleSubmit} className="max-w-lg space-y-4">
       <div>
-        <label className="block text-sm font-medium text-gray-300 mb-1">Invocation Name</label>
+        <label className="block text-sm font-medium text-foreground mb-1">Invocation Name</label>
         <input
           type="text"
           value={prettyName}
@@ -55,11 +55,11 @@ export function NewPipelineForm() {
           placeholder="My Feature Branch"
           required
           maxLength={100}
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+          className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:border-transparent"
         />
         {branchName && (
           <p className="text-xs text-blue-400 mt-1">
-            <code className="bg-gray-800 px-1 rounded">{branchName}</code> will be used as the branch name
+            <code className="bg-muted px-1 rounded">{branchName}</code> will be used as the branch name
           </p>
         )}
         {!branchName && prettyName.trim() && (
@@ -67,13 +67,15 @@ export function NewPipelineForm() {
         )}
       </div>
 
-      <Textarea
-        label="Description"
-        placeholder="Describe what you want the pipeline to build..."
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        rows={4}
-      />
+      <div className="flex flex-col gap-1">
+        <label className="text-sm font-medium text-foreground">Description</label>
+        <Textarea
+          placeholder="Describe what you want the pipeline to build..."
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+          rows={4}
+        />
+      </div>
 
       {error && (
         <div className="bg-red-900/30 border border-red-700 rounded-lg p-3">
@@ -81,7 +83,7 @@ export function NewPipelineForm() {
         </div>
       )}
 
-      <Button type="submit" variant="primary" disabled={submitting}>
+      <Button type="submit" variant="default" disabled={submitting}>
         {submitting ? "Creating..." : "Start Pipeline"}
       </Button>
     </form>

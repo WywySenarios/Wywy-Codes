@@ -1,22 +1,24 @@
 ---
+import {ThemeSetup} from "../ui/ThemeSetup";
 const currentPath = Astro.url.pathname;
 ---
 
-<nav class="border-b border-gray-800 bg-gray-900">
+<nav class="border-b border-border bg-card">
   <div class="max-w-6xl mx-auto px-6 py-3 flex items-center gap-6">
-    <a href="/" class="text-lg font-semibold text-gray-100 hover:text-white">
+    <a href="/" class="text-lg font-semibold hover:text-foreground/80 text-foreground">
       Orchestrator
     </a>
-    <div class="flex gap-4 text-sm">
-      <a href="/" class={`hover:text-white ${currentPath === "/" ? "text-blue-400" : "text-gray-400"}`}>
+    <div class="flex gap-4 text-sm flex-1">
+      <a href="/" class={`hover:text-foreground ${currentPath === "/" ? "text-primary" : "text-muted-foreground"}`}>
         Dashboard
       </a>
-      <a href="/inbox/" class={`hover:text-white ${currentPath === "/inbox/" ? "text-blue-400" : "text-gray-400"}`}>
+      <a href="/inbox/" class={`hover:text-foreground ${currentPath === "/inbox/" ? "text-primary" : "text-muted-foreground"}`}>
         Inbox
       </a>
-      <a href="/new/" class={`hover:text-white ${currentPath === "/new/" ? "text-blue-400" : "text-gray-400"}`}>
+      <a href="/new/" class={`hover:text-foreground ${currentPath === "/new/" ? "text-primary" : "text-muted-foreground"}`}>
         New Pipeline
       </a>
     </div>
+    <ThemeSetup client:load />
   </div>
 </nav>

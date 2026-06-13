@@ -36,13 +36,13 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
     return (
       <div className="space-y-6 animate-pulse">
         <div className="flex items-center justify-between">
-          <div className="h-8 bg-gray-800 rounded w-1/4" />
-          <div className="h-8 bg-gray-800 rounded w-24" />
+          <div className="h-8 bg-muted rounded w-1/4" />
+          <div className="h-8 bg-muted rounded w-24" />
         </div>
         <div className="grid grid-cols-2 gap-4">
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-              <div className="h-4 bg-gray-800 rounded w-2/3" />
+            <div key={i} className="bg-card border border-border rounded-lg p-3">
+              <div className="h-4 bg-muted rounded w-2/3" />
             </div>
           ))}
         </div>
@@ -60,7 +60,7 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
 
   if (!pipeline) {
     return (
-      <div className="text-gray-500 text-center py-12">Pipeline not found.</div>
+      <div className="text-muted-foreground text-center py-12">Pipeline not found.</div>
     );
   }
 
@@ -74,38 +74,38 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
         <div className="flex gap-2">
           {pipeline.user_input_pending && (
             <a href={pipelineRespondUrl(pipeline.id)}>
-              <Button variant="primary">Respond</Button>
+              <Button variant="default">Respond</Button>
             </a>
           )}
           {(pipeline.status === "running" || pipeline.status === "queued") && (
-            <Button variant="danger" onClick={handleAbort}>Abort</Button>
+            <Button variant="destructive" onClick={handleAbort}>Abort</Button>
           )}
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-4 text-sm">
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-          <span className="text-gray-500">ID:</span>{" "}
-          <span className="font-mono text-gray-300">{pipeline.id.slice(0, 12)}</span>
+        <div className="bg-card border border-border rounded-lg p-3">
+          <span className="text-muted-foreground">ID:</span>{" "}
+          <span className="font-mono text-foreground">{pipeline.id.slice(0, 12)}</span>
         </div>
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-          <span className="text-gray-500">Iterations:</span>{" "}
-          <span className="text-gray-300">{pipeline.iteration_count}</span>
+        <div className="bg-card border border-border rounded-lg p-3">
+          <span className="text-muted-foreground">Iterations:</span>{" "}
+          <span className="text-foreground">{pipeline.iteration_count}</span>
         </div>
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-          <span className="text-gray-500">Created:</span>{" "}
-          <span className="text-gray-300">{new Date(pipeline.created_at).toISOString().replace('T', ' ').slice(0, 19)}</span>
+        <div className="bg-card border border-border rounded-lg p-3">
+          <span className="text-muted-foreground">Created:</span>{" "}
+          <span className="text-foreground">{new Date(pipeline.created_at).toISOString().replace('T', ' ').slice(0, 19)}</span>
         </div>
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-3">
-          <span className="text-gray-500">Updated:</span>{" "}
-          <span className="text-gray-300">{new Date(pipeline.updated_at).toISOString().replace('T', ' ').slice(0, 19)}</span>
+        <div className="bg-card border border-border rounded-lg p-3">
+          <span className="text-muted-foreground">Updated:</span>{" "}
+          <span className="text-foreground">{new Date(pipeline.updated_at).toISOString().replace('T', ' ').slice(0, 19)}</span>
         </div>
       </div>
 
       {pipeline.description && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-          <h2 className="text-sm font-medium text-gray-400 mb-2">Description</h2>
-          <p className="text-sm text-gray-300 whitespace-pre-wrap">{pipeline.description}</p>
+        <div className="bg-card border border-border rounded-lg p-4">
+          <h2 className="text-sm font-medium text-muted-foreground mb-2">Description</h2>
+          <p className="text-sm text-foreground whitespace-pre-wrap">{pipeline.description}</p>
         </div>
       )}
 
@@ -116,15 +116,15 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
         </a>
       </div>
 
-      <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
+      <div className="bg-card border border-border rounded-lg p-4">
         <StageProgress stages={stages} />
         <div className="mt-4 space-y-1">
           {stages.map((s) => (
             <div key={s.name} className="flex items-center justify-between text-sm">
-              <span className="text-gray-300">{s.name}</span>
+              <span className="text-foreground">{s.name}</span>
               <div className="flex items-center gap-2">
                 {s.retry_count > 0 && (
-                  <span className="text-xs text-gray-600">({s.retry_count} retries)</span>
+                  <span className="text-xs text-muted-foreground">({s.retry_count} retries)</span>
                 )}
                 <StatusBadge status={s.status} />
               </div>
@@ -135,14 +135,14 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
 
       <div>
         <h2 className="text-lg font-semibold mb-3">
-          Log — <span className="text-gray-400">{currentStage}</span>
+          Log — <span className="text-muted-foreground">{currentStage}</span>
         </h2>
         <LogViewer pipelineId={pipeline.id} stage={currentStage} />
       </div>
 
       {pipeline.pr_url && (
-        <div className="bg-gray-900 border border-gray-800 rounded-lg p-4">
-          <span className="text-gray-400 text-sm">PR: </span>
+        <div className="bg-card border border-border rounded-lg p-4">
+          <span className="text-muted-foreground text-sm">PR: </span>
           <a href={pipeline.pr_url} className="text-blue-400 hover:underline text-sm" target="_blank" rel="noopener">
             {pipeline.pr_url}
           </a>

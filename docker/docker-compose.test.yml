@@ -16,4 +16,13 @@ services:
           | tee /var/log/Wywy-Website/agentic/test-summary.log 2>/dev/null
         exit $${PIPESTATUS[0]}
   astro:
-    command: ["true"]
+    user: root
+    volumes:
+      - ../apps/astro/src:/app/src:rw
+      - ../apps/astro/package.json:/app/package.json:ro
+      - ../apps/astro/tests:/app/tests:rw
+      - ../apps/astro/vitest.config.ts:/app/vitest.config.ts:ro
+      - ../apps/astro/scripts/test.sh:/app/scripts/test.sh:ro
+    command:
+      - bash
+      - scripts/test.sh

@@ -43,11 +43,11 @@ export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; ver
       <div className="flex gap-6 animate-pulse">
         <div className="w-72 space-y-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-20 bg-gray-800 rounded-lg" />
+            <div key={i} className="h-20 bg-muted rounded-lg" />
           ))}
         </div>
         <div className="flex-1">
-          <div className="h-48 bg-gray-800 rounded-lg" />
+          <div className="h-48 bg-muted rounded-lg" />
         </div>
       </div>
     );
@@ -63,7 +63,7 @@ export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; ver
 
   if (!files) {
     return (
-      <div className="text-gray-500 text-center py-12">Loading files...</div>
+      <div className="text-muted-foreground text-center py-12">Loading files...</div>
     );
   }
 
@@ -74,17 +74,17 @@ export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; ver
           const items = files[key];
           if (!items || items.length === 0) return null;
           return (
-            <div key={key} className="bg-gray-900 rounded-lg border border-gray-800 p-3">
-              <h3 className="text-xs font-semibold text-gray-400 uppercase mb-2">{title}</h3>
+            <div key={key} className="bg-card border border-border p-3">
+              <h3 className="text-xs font-semibold text-muted-foreground uppercase mb-2">{title}</h3>
               <ul className="space-y-1">
                 {items.map((f) => (
                   <li key={f.path}>
                     <button
                       onClick={() => openFile(f.path)}
-                      className={`text-left text-sm font-mono w-full truncate hover:text-blue-400 ${selectedFile === f.path ? "text-blue-400" : "text-gray-300"}`}
+                      className={`text-left text-sm font-mono w-full truncate hover:text-blue-400 ${selectedFile === f.path ? "text-blue-400" : "text-foreground"}`}
                     >
                       {f.path}
-                      <span className="text-gray-600 ml-1 text-xs">({f.size}B)</span>
+                      <span className="text-muted-foreground ml-1 text-xs">({f.size}B)</span>
                     </button>
                   </li>
                 ))}
@@ -93,30 +93,30 @@ export function FileExplorer({ pipelineId, verbose }: { pipelineId?: string; ver
           );
         })}
         {!sections.some((s) => files[s.key] && files[s.key].length > 0) && (
-          <p className="text-gray-600 text-sm">No files found.</p>
+          <p className="text-muted-foreground text-sm">No files found.</p>
         )}
       </div>
 
       <div className="flex-1">
         {selectedFile ? (
-          <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+          <div className="bg-card border border-border p-4">
             <div className="flex items-center justify-between mb-3">
-              <h2 className="text-sm font-mono text-gray-300">{selectedFile}</h2>
+              <h2 className="text-sm font-mono text-foreground">{selectedFile}</h2>
               <button
                 onClick={() => { setSelectedFile(null); setContent(null); }}
-                className="text-gray-500 hover:text-gray-300 text-xs"
+                className="text-muted-foreground hover:text-foreground text-xs"
               >
                 Close
               </button>
             </div>
             {contentLoading ? (
-              <p className="text-gray-600 text-sm">Loading...</p>
+              <p className="text-muted-foreground text-sm">Loading...</p>
             ) : (
-              <pre className="text-xs text-gray-300 whitespace-pre-wrap overflow-x-auto max-h-[70vh] overflow-y-auto">{content}</pre>
+              <pre className="text-xs text-foreground whitespace-pre-wrap overflow-x-auto max-h-[70vh] overflow-y-auto">{content}</pre>
             )}
           </div>
         ) : (
-          <div className="bg-gray-900 rounded-lg border border-gray-800 p-8 text-center text-gray-600">
+          <div className="bg-card border border-border p-8 text-center text-muted-foreground">
             Select a file to view its contents.
           </div>
         )}
