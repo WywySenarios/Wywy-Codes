@@ -1,4 +1,4 @@
-FROM node:lts
+FROM node:lts AS base
 
 ARG CONTAINER_GID=2523
 RUN groupadd -g ${CONTAINER_GID} Wywy-Website && \
@@ -11,8 +11,12 @@ RUN chown -R wywy:Wywy-Website /app
 USER wywy
 RUN npm install
 
+FROM base AS dev
+CMD ["npx", "astro", "preview", "--host"]
+
+
+FROM base AS prod
 COPY --chown=wywy:Wywy-Website apps/astro/ ./
 RUN npm run build
 
-EXPOSE 3000
-CMD ["node", "dist/server/entry.mjs"]
+CMD ["npx", "astro", "preview", "--host"]

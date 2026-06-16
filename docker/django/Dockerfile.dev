@@ -1,0 +1,58 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    ca-certificates \
+    jq \
+    nodejs \
+    npm \
+    clang-format \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir ruff
+
+RUN npm install -g prettier
+
+RUN pip install --no-cache-dir \
+    django>=5.0 \
+    djangorestframework \
+    django-cors-headers \
+    docker>=7.0 \
+    gunicorn \
+    pyyaml \
+    whitenoise>=6.0 \
+    pytest \
+    pytest-django
+
+ARG CONTAINER_GID=2523
+ARG CONTAINER_UID=25233
+ARG DOCKER_GID=989
+RUN groupadd -g ${CONTAINER_GID} Wywy-Website && \
+    groupadd -g ${DOCKER_GID} docker_host && \
+    useradd -m -u ${CONTAINER_UID} -g Wywy-Website -G docker_host wywy
+
+RUN mkdir -p /var/log/Wywy-Website/agentic && \
+    mkdir -p /var/lib/Wywy-Website/orchestrator && \
+    mkdir -p /var/workspace/Wywy-Website && \
+    chown -R wywy:Wywy-Website /var/log/Wywy-Website /var/lib/Wywy-Website /var/workspace/Wywy-Website
+
+WORKDIR /app
+
+COPY apps/django/apps/         /app/apps/
+COPY apps/django/config/       /app/config/
+COPY apps/django/manage.py     /app/
+
+# Dev: astro dist is mounted at runtime via docker-compose.dev.yml.
+# Create an empty placeholder so the directory exists for Whitenoise discovery.
+RUN mkdir -p /app/astro-dist
+ENV ASTRO_DIST=/app/astro-dist
+
+USER wywy
+
+RUN git config --global user.email "wywy@localhost" && \
+    git config --global user.name "Wywy" && \
+    git config --global init.defaultBranch master
+
+EXPOSE 8000
+CMD ["sh", "-c", "umask 002 && python manage.py check_db_writable && python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2"]

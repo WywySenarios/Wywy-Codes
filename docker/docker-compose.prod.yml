@@ -1,4 +1,7 @@
 services:
+  astro:
+    build:
+      target: prod
   django:
     environment:
       - DJANGO_DEBUG=false

@@ -1,5 +1,7 @@
 services:
   django:
+    build:
+      dockerfile: docker/django/Dockerfile.dev
     secrets: []
     environment:
       - DJANGO_DEBUG=true
@@ -15,6 +17,7 @@ services:
       dockerfile: docker/astro/Dockerfile
       args:
         CONTAINER_GID: 2523
+      target: dev
     env_file:
       - /etc/Wywy-Website-Control/config/.env
       - /etc/Wywy-Website-Control/config/.env.network
@@ -24,11 +27,11 @@ services:
     environment:
       - PUBLIC_AGENTIC_API_HOST=${AGENTIC_API_HOST:-lolipop}
       - PUBLIC_AGENTIC_API_PORT=${AGENTIC_API_PORT:-2524}
-    command: npm run dev -- --host 0.0.0.0 --port 3000
+    command: npm run dev -- --host
     volumes:
       - ../apps/astro/astro.config.mjs:/app/astro.config.mjs:ro
       - ../apps/astro/src:/app/src:rw
     ports:
-      - "3000:3000"
+      - "3000:4321"
     depends_on:
       - django

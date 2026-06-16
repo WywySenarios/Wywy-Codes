@@ -22,7 +22,7 @@ export default defineConfig({
     },
   },
   use: {
-    baseURL: process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000",
+    baseURL: process.env.PLAYWRIGHT_BASE_URL || "http://localhost:4321",
   },
   projects: [
     {
@@ -34,7 +34,7 @@ export default defineConfig({
   webServer: {
     command: "npm run dev",
     cwd: "../..",
-    port: 3000,
+    port: 4321,
     timeout: 30000,
     reuseExistingServer: !process.env.CI,
   },

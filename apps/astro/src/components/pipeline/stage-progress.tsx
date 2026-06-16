@@ -20,8 +20,7 @@ export function StatusBadge({ status }: { status: string }) {
 
 export function StageProgress({ stages }: { stages: { name: string; status: string }[] }) {
   const STAGE_ORDER = [
-    "planner", "plan_reviewer", "test_builder", "testing_align_red",
-    "coder", "code_reviewer", "testing_green", "pr_writer", "pr_reviewer",
+    "RED", "GREEN", "REFRACTOR", "compilance", "PR writer",
   ];
 
   return (
