@@ -114,15 +114,19 @@ class TestRunStageUsesServerNotDocker:
         orchestrator.advance_pipeline(pipeline)
 
         pipeline.refresh_from_db()
-        assert pipeline.status == "completed"
+        # Iterative: only one stage runs per call, pipeline stays running
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running (iterative), got {pipeline.status}"
+        )
 
-        # Each stage = 2 HTTP POSTs (create session + send message) = 18 total
-        assert len(http_posts) == len(orchestrator.STAGE_ORDER) * 2, (
-            f"Expected {len(orchestrator.STAGE_ORDER) * 2} HTTP POSTs, "
+        # Each stage = 2 HTTP POSTs (create session + send message).
+        # Iterative: only the first stage should have been invoked.
+        assert len(http_posts) == 2, (
+            f"Expected 2 HTTP POSTs for one stage (iterative), "
             f"got {len(http_posts)}"
         )
 
-        # Verify each stage creates a session
+        # Verify the first stage created a session
         session_paths: list[str] = []
         message_paths: list[str] = []
         for post in http_posts:
@@ -131,16 +135,22 @@ class TestRunStageUsesServerNotDocker:
             else:
                 session_paths.append(post["path"])
 
-        assert len(session_paths) == len(orchestrator.STAGE_ORDER)
-        assert len(message_paths) == len(orchestrator.STAGE_ORDER)
+        # Iterative: only the first stage ran — 1 session + 1 message
+        assert len(session_paths) == 1, (
+            f"Expected 1 session for the first stage, "
+            f"got {len(session_paths)}"
+        )
+        assert len(message_paths) == 1, (
+            f"Expected 1 message for the first stage, "
+            f"got {len(message_paths)}"
+        )
 
-        # Each session post includes the stage name as title
-        for i, stage_name in enumerate(orchestrator.STAGE_ORDER):
-            session_post = http_posts[i * 2]  # every other post is session create
-            assert session_post["kwargs"]["json"]["title"] == stage_name, (
-                f"Session {i}: expected title '{stage_name}', "
-                f"got '{session_post['kwargs']['json'].get('title')}'"
-            )
+        # The session title must match the first (and only) stage name
+        first_session = http_posts[0]
+        assert first_session["kwargs"]["json"]["title"] == orchestrator.STAGE_ORDER[0], (
+            f"Session title should be '{orchestrator.STAGE_ORDER[0]}', "
+            f"got '{first_session['kwargs']['json'].get('title')}'"
+        )
 
     def test_blocked_stage_stops_pipeline(
         self,

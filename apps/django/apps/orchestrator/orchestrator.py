@@ -287,26 +287,18 @@ def advance_pipeline(pipeline: Pipeline) -> None:
     try:
         stage = pipeline.stages.get(name=next_stage_name)
     except PipelineStage.DoesNotExist:
-        # Graceful recovery: if no stage rows exist at all, create them
-        # and retry.  This handles the case where the orchestrator
-        # crashed before _create_stages was called during
-        # _execute_pipeline, leaving the pipeline with zero stages.
-        if not pipeline.stages.exists():
-            _create_stages(pipeline)
-            stage = pipeline.stages.get(name=next_stage_name)
-        else:
-            pipeline.status = "failed"
-            pipeline.save(update_fields=["status", "updated_at"])
-            _write_orchestrator_log(
-                pipeline,
-                "ERROR",
-                (
-                    "Pipeline stage row missing for expected stage "
-                    f"'{next_stage_name}'"
-                ),
-            )
-            _teardown_workspace(pipeline)
-            return
+        pipeline.status = "failed"
+        pipeline.save(update_fields=["status", "updated_at"])
+        _write_orchestrator_log(
+            pipeline,
+            "ERROR",
+            (
+                "Pipeline stage row missing for expected stage "
+                f"'{next_stage_name}'"
+            ),
+        )
+        _teardown_workspace(pipeline)
+        return
     if stage.status in ("completed", "failed"):
         return
     if stage.retry_after and stage.retry_after > dj_timezone.now():
@@ -394,7 +386,6 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
             )
             if stage.name == "GREEN":
                 _run_formatters(pipeline)
-            advance_pipeline(pipeline)
         else:
             stage.status = "failed"
             stage.save(update_fields=["status", "finished_at"])

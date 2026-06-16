@@ -105,14 +105,14 @@ class TestAgentInvocationPerStage:
         monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
         monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
 
-        # 7. Run — single advance_pipeline chains through all remaining stages
+        # 7. Run — advance_pipeline should advance exactly one stage (iterative)
         orchestrator.advance_pipeline(pipeline)
 
-        # 8. Verify target stage was spawned first
+        # 8. Verify target stage was spawned
         assert len(spawn_calls) > 0, f"No agent spawned for stage {stage_name}"
         spawned_pipeline, spawned_stage = spawn_calls[0]
         assert spawned_stage.name == stage_name, (
-            f"Expected first spawn to be {stage_name}, got {spawned_stage.name}"
+            f"Expected spawn to be {stage_name}, got {spawned_stage.name}"
         )
 
         # 9. Verify call context
@@ -120,30 +120,34 @@ class TestAgentInvocationPerStage:
         assert spawned_pipeline.invocation_name == f"agent-test-{stage_name}"
         assert spawned_stage.name == stage_name
 
-        # 10. Verify pipeline completed
+        # 10. Verify only one stage was spawned (iterative — not recursive)
+        assert len(spawn_calls) == 1, (
+            f"Expected exactly 1 spawn (iterative), got {len(spawn_calls)}: "
+            f"{[s.name for _, s in spawn_calls]}"
+        )
+
+        # 11. Verify pipeline is still running and only the target stage completed
         pipeline.refresh_from_db()
-        assert pipeline.status == "completed", (
-            f"Expected completed, got {pipeline.status}"
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running after one advance, "
+            f"got {pipeline.status}"
+        )
+        target = pipeline.stages.get(name=stage_name)
+        assert target.status == "completed", (
+            f"Stage {stage_name} should be completed, got {target.status}"
         )
         for name in orchestrator.STAGE_ORDER:
+            if name == stage_name:
+                continue
             st = pipeline.stages.get(name=name)
-            assert st.status == "completed", (
-                f"Stage {name} should be completed, got {st.status}"
-            )
-
-        # Verify spawn count covers all remaining stages (target through pr_reviewer)
-        remaining_idx = orchestrator.STAGE_ORDER.index(stage_name)
-        remaining_count = len(orchestrator.STAGE_ORDER) - remaining_idx
-        assert len(spawn_calls) == remaining_count, (
-            f"Expected {remaining_count} spawns for stages {stage_name}..pr_reviewer, "
-            f"got {len(spawn_calls)}: {[s.name for _, s in spawn_calls]}"
-        )
-        for i, (_, s) in enumerate(spawn_calls):
-            expected_idx = remaining_idx + i
-            expected_name = orchestrator.STAGE_ORDER[expected_idx]
-            assert s.name == expected_name, (
-                f"Expected spawn {i} to be {expected_name}, got {s.name}"
-            )
+            if name in prior_stages:
+                assert st.status == "completed", (
+                    f"Prior stage {name} should be completed, got {st.status}"
+                )
+            else:
+                assert st.status in ("pending", "running"), (
+                    f"Future stage {name} should be pending, got {st.status}"
+                )
 
 
 class TestInitStageInitialization:

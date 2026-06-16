@@ -65,72 +65,6 @@ class TestAdvanceOnFailure:
         pipeline_running.refresh_from_db()
         assert pipeline_running.status == "failed"
 
-    def test_advance_creates_missing_stages_when_pipeline_has_none(
-        self,
-        db: None,
-        monkeypatch: MonkeyPatch,
-    ) -> None:
-        """When advance_pipeline encounters a pipeline with status='running'
-        and NO PipelineStage rows at all, it should create the stages and
-        proceed gracefully rather than immediately failing the pipeline.
-
-        This covers the real-world scenario where the orchestrator crashes
-        between setting a pipeline to 'running' and calling _create_stages.
-        On restart, _reap_orphaned_pipelines sets the pipeline to 'failed',
-        and if the user retries, advance_pipeline must recover gracefully.
-        """
-        # ── Arrange ──────────────────────────────────────────────────────
-        pipeline = Pipeline.objects.create(
-            invocation_name="zero-stages-recovery",
-            description="Pipeline with no stages — must be recovered",
-            status="running",
-        )
-        # No stages created — pipeline.stages is empty
-
-        # Mock all external side-effects that _run_stage would invoke
-        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
-        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
-        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
-        monkeypatch.setattr(
-            orchestrator, "_spawn_agent_container",
-            lambda p, s: (0, False),
-        )
-        monkeypatch.setattr(
-            orchestrator, "_validate_stage_state",
-            lambda p, s: (True, ""),
-        )
-        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
-        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
-        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
-
-        # ── Act ──────────────────────────────────────────────────────────
-        orchestrator.advance_pipeline(pipeline)
-
-        # ── Assert ───────────────────────────────────────────────────────
-        pipeline.refresh_from_db()
-
-        # Stages must have been created (graceful recovery)
-        stage_count = pipeline.stages.count()
-        assert stage_count == len(orchestrator.STAGE_ORDER), (
-            f"Expected {len(orchestrator.STAGE_ORDER)} stages to be created, "
-            f"got {stage_count}"
-        )
-
-        # Pipeline must NOT be in 'failed' status — it should have completed
-        # all stages gracefully (all mocks return success, so the recursive
-        # chaining in _run_stage advances through all 6 stages).
-        assert pipeline.status == "completed", (
-            f"Pipeline should have recovered gracefully, got status="
-            f"{pipeline.status!r}"
-        )
-
-        # Pipeline should have advanced through all stages to the final one
-        assert pipeline.current_stage == orchestrator.STAGE_ORDER[-1], (
-            f"Pipeline should have reached the final stage, got "
-            f"current_stage={pipeline.current_stage!r}"
-        )
-
-
 class TestResilience:
     def test_survives_filesystem_deletion_during_advancement(
         self,
@@ -368,4 +302,359 @@ class TestResilience:
         )
         assert pipeline_running.status == "failed", (
             f"Pipeline should be 'failed' after max retries, got {pipeline_running.status}"
+        )
+
+
+class TestIterativeAdvancement:
+    """advance_pipeline must advance exactly one stage per call (iterative).
+
+    The orchestrator loop calls advance_pipeline every tick; it must not
+    chain recursively through all remaining stages.
+    """
+
+    def test_advances_one_stage_per_call(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """After a stage completes, advance_pipeline must stop and return
+        rather than recursively chaining to the next stage."""
+        # ── Arrange ──────────────────────────────────────────────────────
+        pipeline = Pipeline.objects.create(
+            invocation_name="iterative-test",
+            description="Verify one stage per call",
+            status="running",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
+        # Mark first stage completed so advance_pipeline proceeds to stage 1
+        pipeline.stages.filter(name=orchestrator.STAGE_ORDER[0]).update(status="completed")
+        pipeline.current_stage = orchestrator.STAGE_ORDER[0]
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        # Track how many times _spawn_agent_container is called
+        spawn_calls: list[str] = []
+
+        def track_spawn(_p: Pipeline, s: PipelineStage) -> tuple[int, bool]:
+            spawn_calls.append(s.name)
+            return (0, False)
+
+        monkeypatch.setattr(orchestrator, "_spawn_agent_container", track_spawn)
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
+        monkeypatch.setattr(
+            orchestrator, "_validate_stage_state",
+            lambda p, s: (True, ""),
+        )
+        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
+
+        # ── Act ──────────────────────────────────────────────────────────
+        orchestrator.advance_pipeline(pipeline)
+
+        # ── Assert ───────────────────────────────────────────────────────
+        # Iterative: exactly one stage must be spawned
+        assert len(spawn_calls) == 1, (
+            f"Expected 1 spawn (iterative), got {len(spawn_calls)}: "
+            f"{', '.join(spawn_calls)}"
+        )
+        assert spawn_calls[0] == orchestrator.STAGE_ORDER[1], (
+            f"Expected stage {orchestrator.STAGE_ORDER[1]} to be spawned, "
+            f"got {spawn_calls[0]}"
+        )
+
+        pipeline.refresh_from_db()
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running after one advance, "
+            f"got {pipeline.status}"
+        )
+
+        # Verify later stages are untouched
+        for name in orchestrator.STAGE_ORDER[2:]:
+            st = pipeline.stages.get(name=name)
+            assert st.status == "pending", (
+                f"Stage '{name}' should still be pending after one "
+                f"advance call, got {st.status}"
+            )
+
+    def test_n_calls_advance_n_stages_to_completion(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """Calling advance_pipeline repeatedly advances one stage per call
+        until the pipeline reaches 'completed'."""
+        # ── Arrange ──────────────────────────────────────────────────────
+        pipeline = Pipeline.objects.create(
+            invocation_name="n-calls-test",
+            description="Verify N calls = N stages",
+            status="running",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
+        # Mark first stage completed so advance proceeds to stage 1
+        pipeline.stages.filter(name=orchestrator.STAGE_ORDER[0]).update(status="completed")
+        pipeline.current_stage = orchestrator.STAGE_ORDER[0]
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        spawn_calls: list[str] = []
+
+        def track_spawn(_p: Pipeline, s: PipelineStage) -> tuple[int, bool]:
+            spawn_calls.append(s.name)
+            return (0, False)
+
+        monkeypatch.setattr(orchestrator, "_spawn_agent_container", track_spawn)
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
+        monkeypatch.setattr(
+            orchestrator, "_validate_stage_state",
+            lambda p, s: (True, ""),
+        )
+        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
+
+        remaining = len(orchestrator.STAGE_ORDER) - 1  # first is already done
+
+        # ── Act: call advance_pipeline for each remaining stage + one
+        # more to trigger _complete_pipeline (the "no next stage" check
+        # only fires on the call *after* the last stage completes).
+        # total calls = remaining + 1
+        for i in range(remaining + 1):
+            orchestrator.advance_pipeline(pipeline)
+            pipeline.refresh_from_db()
+
+            if i < remaining:
+                # This call should have spawned one stage
+                assert len(spawn_calls) == i + 1, (
+                    f"After call {i+1}, expected {i+1} spawns, "
+                    f"got {len(spawn_calls)}"
+                )
+                expected_stage = orchestrator.STAGE_ORDER[i + 1]
+                assert spawn_calls[i] == expected_stage, (
+                    f"Call {i+1} should have spawned {expected_stage}, "
+                    f"got {spawn_calls[i]}"
+                )
+                # Pipeline should still be running (last stage not consumed yet)
+                assert pipeline.status == "running", (
+                    f"After call {i+1}, pipeline should still be "
+                    f"running, got {pipeline.status}"
+                )
+
+        # ── Assert: all stages completed, pipeline done ──────────────────
+        pipeline.refresh_from_db()
+        assert pipeline.status == "completed", (
+            f"Pipeline should be completed after {remaining + 1} calls, "
+            f"got {pipeline.status}"
+        )
+        assert len(spawn_calls) == remaining, (
+            f"Expected {remaining} total spawns (last call does not spawn), "
+            f"got {len(spawn_calls)}"
+        )
+        for name in orchestrator.STAGE_ORDER:
+            st = pipeline.stages.get(name=name)
+            assert st.status == "completed", (
+                f"Stage '{name}' should be completed, got {st.status}"
+            )
+
+    def test_advance_on_completed_pipeline_is_noop(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+        pipeline_completed: Pipeline,
+    ) -> None:
+        """Calling advance_pipeline on an already-completed pipeline
+        must not change any state or spawn any agents."""
+        spawn_calls: list[str] = []
+
+        monkeypatch.setattr(
+            orchestrator, "_spawn_agent_container",
+            lambda _p, _s: (_ for _ in ()).throw(
+                AssertionError("Must not spawn on completed pipeline")
+            ),
+        )
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+
+        status_before = pipeline_completed.status
+
+        orchestrator.advance_pipeline(pipeline_completed)
+
+        pipeline_completed.refresh_from_db()
+        assert pipeline_completed.status == status_before, (
+            f"Status should remain '{status_before}', "
+            f"got {pipeline_completed.status}"
+        )
+
+    def test_advance_on_failed_pipeline_is_noop(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+        pipeline_failed: Pipeline,
+    ) -> None:
+        """Calling advance_pipeline on a failed pipeline must not
+        change any state or spawn any agents."""
+        monkeypatch.setattr(
+            orchestrator, "_spawn_agent_container",
+            lambda _p, _s: (_ for _ in ()).throw(
+                AssertionError("Must not spawn on failed pipeline")
+            ),
+        )
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+
+        status_before = pipeline_failed.status
+
+        orchestrator.advance_pipeline(pipeline_failed)
+
+        pipeline_failed.refresh_from_db()
+        assert pipeline_failed.status == status_before, (
+            f"Status should remain '{status_before}', "
+            f"got {pipeline_failed.status}"
+        )
+
+    def test_last_stage_triggers_completion(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """When advance_pipeline runs the last stage and finds no next
+        stage, it must call _complete_pipeline and mark the pipeline
+        as completed."""
+        # ── Arrange: all stages up to penultimate completed, final pending ──
+        pipeline = Pipeline.objects.create(
+            invocation_name="last-stage-test",
+            description="Verify last stage triggers completion",
+            status="running",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(pipeline=pipeline, name=name, status="completed")
+        penultimate = orchestrator.STAGE_ORDER[-2]
+        final_stage = orchestrator.STAGE_ORDER[-1]
+        # Reset final stage to pending so it will be executed
+        pipeline.stages.filter(name=final_stage).update(status="pending")
+        pipeline.current_stage = penultimate
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        spawn_calls: list[str] = []
+
+        def track_spawn(_p: Pipeline, s: PipelineStage) -> tuple[int, bool]:
+            spawn_calls.append(s.name)
+            return (0, False)
+
+        monkeypatch.setattr(orchestrator, "_spawn_agent_container", track_spawn)
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
+        monkeypatch.setattr(
+            orchestrator, "_validate_stage_state",
+            lambda p, s: (True, ""),
+        )
+        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
+
+        # ── Act 1: advance to final stage ────────────────────────────────
+        # advance_pipeline runs the last stage (GREEN in conftest fixture,
+        # but here it's the last stage in STAGE_ORDER)
+        orchestrator.advance_pipeline(pipeline)
+        pipeline.refresh_from_db()
+
+        # The last stage should have been spawned and completed
+        assert len(spawn_calls) == 1, (
+            f"Expected 1 spawn for the final stage, got {len(spawn_calls)}"
+        )
+        assert spawn_calls[0] == final_stage, (
+            f"Expected final stage '{final_stage}' to be spawned, "
+            f"got {spawn_calls[0]}"
+        )
+        last = pipeline.stages.get(name=final_stage)
+        assert last.status == "completed", (
+            f"Final stage should be completed, got {last.status}"
+        )
+        # Pipeline still running — _complete_pipeline hasn't been called yet
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running after final stage runs, "
+            f"got {pipeline.status}"
+        )
+        # current_stage should now be the final stage
+        assert pipeline.current_stage == final_stage, (
+            f"current_stage should be '{final_stage}', "
+            f"got {pipeline.current_stage}"
+        )
+
+        # ── Act 2: complete the pipeline ─────────────────────────────────
+        orchestrator.advance_pipeline(pipeline)
+        pipeline.refresh_from_db()
+
+        # No new spawns — the final stage is already completed,
+        # and there's no next stage, so _complete_pipeline fires
+        assert len(spawn_calls) == 1, (
+            f"No new spawns expected during completion, "
+            f"got {len(spawn_calls)}"
+        )
+        assert pipeline.status == "completed", (
+            f"Pipeline should be completed after final stage, "
+            f"got {pipeline.status}"
+        )
+
+    def test_no_current_stage_starts_at_init(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """When current_stage is None (fresh pipeline), advance_pipeline
+        must start with the first stage in STAGE_ORDER (init)."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="no-current-stage",
+            description="Start from init when current_stage is None",
+            status="running",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
+        # Explicitly set current_stage to None
+        pipeline.current_stage = None
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        spawn_calls: list[str] = []
+
+        def track_spawn(_p: Pipeline, s: PipelineStage) -> tuple[int, bool]:
+            spawn_calls.append(s.name)
+            return (0, False)
+
+        monkeypatch.setattr(orchestrator, "_spawn_agent_container", track_spawn)
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
+        monkeypatch.setattr(
+            orchestrator, "_validate_stage_state",
+            lambda p, s: (True, ""),
+        )
+        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
+
+        orchestrator.advance_pipeline(pipeline)
+
+        assert len(spawn_calls) == 1, (
+            f"Expected 1 spawn for init stage, got {len(spawn_calls)}"
+        )
+        assert spawn_calls[0] == orchestrator.STAGE_ORDER[0], (
+            f"Expected first stage '{orchestrator.STAGE_ORDER[0]}' to be "
+            f"spawned, got {spawn_calls[0]}"
+        )
+
+        pipeline.refresh_from_db()
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running after init, "
+            f"got {pipeline.status}"
+        )
+        init_stage = pipeline.stages.get(name=orchestrator.STAGE_ORDER[0])
+        assert init_stage.status == "completed", (
+            f"Init stage should be completed, got {init_stage.status}"
+        )
+        assert pipeline.current_stage == orchestrator.STAGE_ORDER[0], (
+            f"current_stage should be '{orchestrator.STAGE_ORDER[0]}', "
+            f"got {pipeline.current_stage}"
         )
