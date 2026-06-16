@@ -18,6 +18,16 @@ from apps.orchestrator.state.state_manager import (
 )
 
 
+EXPECTED_STAGE_NAMES = (
+    "init",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
+)
+
+
 class TestInitState:
     def test_creates_queued_state(self):
         state = init_state("my-branch", "test-123")
@@ -29,7 +39,8 @@ class TestInitState:
         state = init_state("auto-branch")
         assert len(state.pipeline_id) > 0
         assert state.status == "queued"
-        assert len(state.stages) == 11
+        assert len(state.stages) == len(EXPECTED_STAGE_NAMES)
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
 
 
 class TestWriteAndReadState:
@@ -109,28 +120,32 @@ class TestBackupState:
 class TestValidateState:
     def test_queued_state_is_valid(self):
         state = PipelineState(invocation_name="t", status="queued", pipeline_id="v1")
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         valid, errors = validate_state(state)
         assert valid, str(errors)
         assert errors == []
 
     def test_running_with_one_running_stage(self):
         state = PipelineState(invocation_name="t", status="running", pipeline_id="v1")
-        state.current_stage = "planner"
-        state.stages["planner"].status = "running"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.current_stage = STAGE_NAMES[0]
+        state.stages[STAGE_NAMES[0]].status = "running"
         valid, errors = validate_state(state)
         assert valid, str(errors)
 
     def test_running_with_no_running_stage(self):
         state = PipelineState(invocation_name="t", status="running", pipeline_id="v1")
-        state.current_stage = "planner"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.current_stage = STAGE_NAMES[0]
         valid, _ = validate_state(state)
         assert not valid
 
     def test_running_with_multiple_running_stages(self):
         state = PipelineState(invocation_name="t", status="running", pipeline_id="v1")
-        state.current_stage = "planner"
-        state.stages["planner"].status = "running"
-        state.stages["coder"].status = "running"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.current_stage = STAGE_NAMES[0]
+        state.stages[STAGE_NAMES[0]].status = "running"
+        state.stages[STAGE_NAMES[1]].status = "running"
         valid, _ = validate_state(state)
         assert not valid
 
@@ -141,31 +156,35 @@ class TestValidateState:
 
     def test_bad_stage_status(self):
         state = PipelineState(invocation_name="t", status="running", pipeline_id="v1")
-        state.current_stage = "planner"
-        state.stages["planner"].status = "running"
-        state.stages["plan_reviewer"].status = "badvalue"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.current_stage = STAGE_NAMES[0]
+        state.stages[STAGE_NAMES[0]].status = "running"
+        state.stages[STAGE_NAMES[1]].status = "badvalue"
         valid, errors = validate_state(state)
         assert not valid
-        assert any("plan_reviewer" in e for e in errors)
+        assert any(STAGE_NAMES[1] in e for e in errors)
 
     def test_terminal_status_no_running_stages(self):
         state = PipelineState(invocation_name="t", status="completed", pipeline_id="v1")
-        state.stages["planner"].status = "completed"
-        state.stages["coder"].status = "running"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.stages[STAGE_NAMES[0]].status = "completed"
+        state.stages[STAGE_NAMES[1]].status = "running"
         valid, _ = validate_state(state)
         assert not valid
 
     def test_blocked_pipeline_valid(self):
         state = PipelineState(invocation_name="t", status="blocked", pipeline_id="v1")
-        state.current_stage = "coder"
-        state.stages["coder"].status = "blocked"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.current_stage = STAGE_NAMES[1]
+        state.stages[STAGE_NAMES[1]].status = "blocked"
         valid, _ = validate_state(state)
         assert valid
 
     def test_running_with_bad_current_stage(self):
         state = PipelineState(invocation_name="t", status="running", pipeline_id="v1")
         state.current_stage = "nonexistent_stage"
-        state.stages["planner"].status = "running"
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        state.stages[STAGE_NAMES[0]].status = "running"
         valid, _ = validate_state(state)
         assert not valid
 
@@ -173,19 +192,21 @@ class TestValidateState:
 class TestRecordError:
     def test_appends_error_and_updates_timestamp(self):
         state = PipelineState(invocation_name="test", pipeline_id="re-1")
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         old_time = state.updated_at
-        record_error(state, "planner", "timeout occurred")
+        record_error(state, STAGE_NAMES[0], "timeout occurred")
         assert len(state.errors) == 1
-        assert state.errors[0].stage == "planner"
+        assert state.errors[0].stage == STAGE_NAMES[0]
         assert state.errors[0].message == "timeout occurred"
         assert state.updated_at != old_time
 
     def test_multiple_errors(self):
         state = PipelineState(invocation_name="test", pipeline_id="re-2")
-        record_error(state, "planner", "first")
-        record_error(state, "coder", "second")
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
+        record_error(state, STAGE_NAMES[0], "first")
+        record_error(state, STAGE_NAMES[1], "second")
         assert len(state.errors) == 2
-        assert state.errors[1].stage == "coder"
+        assert state.errors[1].stage == STAGE_NAMES[1]
 
 
 class TestStateOwnershipSeparation:
@@ -199,18 +220,21 @@ class TestStateOwnershipSeparation:
 
     def test_agent_stage_update_pattern(self):
         """Simulate an agent updating only its own stage."""
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         state = PipelineState(invocation_name="test", pipeline_id="own-1")
         state.status = "running"
-        state.current_stage = "coder"
+        agent_stage = STAGE_NAMES[1]
+        next_stage = STAGE_NAMES[2]
+        state.current_stage = agent_stage
 
-        state.stages["coder"].status = "completed"
-        state.stages["coder"].output = {"files_changed": ["foo.ts"]}
+        state.stages[agent_stage].status = "completed"
+        state.stages[agent_stage].output = {"files_changed": ["foo.ts"]}
         state.updated_at = "2026-01-01T00:00:00Z"
 
-        state.current_stage = "code_reviewer"
+        state.current_stage = next_stage
         state.iteration_count += 1
 
-        assert state.stages["planner"].status == "pending"
-        assert state.stages["code_reviewer"].status == "pending"
-        assert state.stages["coder"].status == "completed"
-        assert state.current_stage == "code_reviewer"
+        assert state.stages[STAGE_NAMES[0]].status == "pending"
+        assert state.stages[next_stage].status == "pending"
+        assert state.stages[agent_stage].status == "completed"
+        assert state.current_stage == next_stage

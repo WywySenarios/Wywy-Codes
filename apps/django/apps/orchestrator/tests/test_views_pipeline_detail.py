@@ -25,10 +25,10 @@ class TestPipelineDetail:
         assert response.status_code == 200
         data = response.json()
         assert "stages" in data
-        assert len(data["stages"]) == 9
+        assert len(data["stages"]) == 6
         stage_names = {s["name"] for s in data["stages"]}
-        assert "planner" in stage_names
-        assert "coder" in stage_names
+        assert "RED" in stage_names
+        assert "GREEN" in stage_names
 
     def test_stage_has_all_fields(self, client, db, pipeline_running):
         response = client.get(self.url(pipeline_running))
@@ -53,10 +53,10 @@ class TestPipelineDetail:
 
     def test_detail_stages_sorted(self, client, db):
         pipeline = Pipeline.objects.create(invocation_name="sorted", status="running")
-        PipelineStage.objects.create(pipeline=pipeline, name="planner", status="completed")
-        PipelineStage.objects.create(pipeline=pipeline, name="coder", status="pending")
+        PipelineStage.objects.create(pipeline=pipeline, name="RED", status="completed")
+        PipelineStage.objects.create(pipeline=pipeline, name="GREEN", status="pending")
 
         response = client.get(self.url(pipeline))
         stages = response.json()["stages"]
-        assert stages[0]["name"] == "planner"  # ordered by id (creation order)
-        assert stages[1]["name"] == "coder"
+        assert stages[0]["name"] == "RED"  # ordered by id (creation order)
+        assert stages[1]["name"] == "GREEN"

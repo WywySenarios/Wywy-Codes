@@ -198,7 +198,7 @@ class TestVolumeMountPaths:
         workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline_queued.id)
 
         from apps.orchestrator.models import PipelineStage
-        stage = PipelineStage(pipeline=pipeline_queued, name="planner")
+        stage = PipelineStage(pipeline=pipeline_queued, name="RED")
 
         # Reconstruct the volumes dict as _spawn_agent_container would
         volumes = {}
@@ -581,4 +581,3 @@ class TestLockedNonSecrets:
                 orchestrator._create_workspace(pipeline_queued)
         finally:
             locked.chmod(0o755)
-

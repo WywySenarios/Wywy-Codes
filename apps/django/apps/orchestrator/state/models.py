@@ -27,17 +27,12 @@ TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled
 
 # Ordered list of pipeline stages in execution order.
 STAGE_NAMES: tuple[str, ...] = (
-    "planner",
-    "plan_reviewer",
-    "test_builder",
-    "testing_align_red",
-    "coder",
-    "code_reviewer",
-    "testing_green_unit",
-    "integration_e2e_builder",
-    "testing_green_integration",
-    "pr_writer",
-    "pr_reviewer",
+    "init",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
 )
 
 

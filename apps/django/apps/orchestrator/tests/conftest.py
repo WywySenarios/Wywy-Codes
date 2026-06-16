@@ -31,14 +31,21 @@ def pipeline_running(db) -> Pipeline:
         invocation_name="running-pipeline",
         description="Pipeline in progress",
         status="running",
-        current_stage="planner",
+        current_stage="RED",
         iteration_count=1,
     )
-    stage_names = ["planner", "plan_reviewer", "test_builder", "testing_align_red",
-                    "coder", "code_reviewer", "testing_green", "pr_writer", "pr_reviewer"]
+    stage_names = [
+        "init",
+        "RED",
+        "GREEN",
+        "REFRACTOR",
+        "compilance",
+        "PR writer",
+    ]
     for name in stage_names:
         PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
-    PipelineStage.objects.filter(pipeline=pipeline, name="planner").update(status="running")
+    PipelineStage.objects.filter(pipeline=pipeline, name="init").update(status="completed")
+    PipelineStage.objects.filter(pipeline=pipeline, name="RED").update(status="running")
     return pipeline
 
 
@@ -48,7 +55,7 @@ def pipeline_awaiting_input(db) -> Pipeline:
         invocation_name="awaiting-input",
         description="Pipeline waiting for user",
         status="running",
-        current_stage="coder",
+        current_stage="GREEN",
         user_input_pending=True,
         user_input_request={"question": "What color?", "options": ["red", "blue"]},
     )
@@ -60,7 +67,7 @@ def pipeline_completed(db) -> Pipeline:
         invocation_name="completed-pipeline",
         description="Done pipeline",
         status="completed",
-        current_stage="pr_reviewer",
+        current_stage="PR writer",
         pr_url="https://github.com/test/pr/1",
     )
 
@@ -71,7 +78,7 @@ def pipeline_failed(db) -> Pipeline:
         invocation_name="failed-pipeline",
         description="Failed pipeline",
         status="failed",
-        current_stage="coder",
+        current_stage="GREEN",
     )
 
 

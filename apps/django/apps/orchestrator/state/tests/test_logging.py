@@ -19,18 +19,18 @@ from apps.orchestrator.state.logging import (
 
 class TestBuildEntry:
     def test_basic_entry_format(self):
-        entry_str = _build_entry("INFO", "pipe-1", "coder", "orchestrator", "starting")
+        entry_str = _build_entry("INFO", "pipe-1", "GREEN", "orchestrator", "starting")
         entry = json.loads(entry_str)
         assert entry["level"] == "INFO"
         assert entry["pipeline"] == "pipe-1"
-        assert entry["stage"] == "coder"
+        assert entry["stage"] == "GREEN"
         assert entry["src"] == "orchestrator"
         assert entry["msg"] == "starting"
         assert "ctx" not in entry
 
     def test_entry_with_context(self):
         entry_str = _build_entry(
-            "WARN", "pipe-1", "planner", "orchestrator",
+            "WARN", "pipe-1", "RED", "orchestrator",
             "retry", {"attempt": 3, "max": 5}
         )
         entry = json.loads(entry_str)
@@ -62,7 +62,7 @@ class TestLogWriter:
 
     def test_info_writes_entry(self, log_path):
         writer = LogWriter(str(log_path))
-        writer.info("p1", "planner", "orchestrator", "start")
+        writer.info("p1", "RED", "orchestrator", "start")
         with open(log_path) as f:
             lines = f.readlines()
         assert len(lines) == 1
@@ -71,7 +71,7 @@ class TestLogWriter:
 
     def test_warn_writes_entry(self, log_path):
         writer = LogWriter(str(log_path))
-        writer.warn("p1", "planner", "orchestrator", "warning", {"code": 1})
+        writer.warn("p1", "RED", "orchestrator", "warning", {"code": 1})
         with open(log_path) as f:
             entry = json.loads(f.readline())
         assert entry["level"] == "WARN"
@@ -79,7 +79,7 @@ class TestLogWriter:
 
     def test_error_writes_entry(self, log_path):
         writer = LogWriter(str(log_path))
-        writer.error("p1", "coder", "orchestrator", "crash", {"exit": 1})
+        writer.error("p1", "GREEN", "orchestrator", "crash", {"exit": 1})
         with open(log_path) as f:
             entry = json.loads(f.readline())
         assert entry["level"] == "ERROR"
@@ -147,23 +147,16 @@ class TestTailLog:
 
 class TestValidSources:
     def test_all_stages_have_valid_source(self):
-        expected_sources = (
+        expected_sources = frozenset({
             "orchestrator",
-            "planner",
-            "plan_reviewer",
-            "test_builder",
-            "coder",
-            "code_reviewer",
+            "RED",
+            "GREEN",
+            "REFRACTOR",
+            "compilance",
+            "PR writer",
             "testing",
-            "testing_align_red",
-            "testing_green_unit",
-            "testing_green_integration",
-            "integration_e2e_builder",
-            "pr_writer",
-            "pr_reviewer",
-        )
-        for name in expected_sources:
-            assert name in VALID_SOURCES, f"Source '{name}' missing from VALID_SOURCES"
+        })
+        assert VALID_SOURCES == expected_sources
 
     def test_orchestrator_source_present(self):
         assert "orchestrator" in VALID_SOURCES

@@ -29,18 +29,12 @@ LOG_BASE_DIR: str = "/var/log/Wywy-Website/agentic"
 # Valid values for the ``src`` field in log entries.
 VALID_SOURCES: frozenset[str] = frozenset({
     "orchestrator",
-    "planner",
-    "plan_reviewer",
-    "test_builder",
-    "coder",
-    "code_reviewer",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
     "testing",
-    "testing_align_red",
-    "testing_green_unit",
-    "testing_green_integration",
-    "integration_e2e_builder",
-    "pr_writer",
-    "pr_reviewer",
 })
 
 
@@ -58,7 +52,7 @@ def _build_entry(
         level: INFO, WARN, or ERROR.
         pipeline: Pipeline UUID.
         stage: Current pipeline stage name.
-        src: Source component (orchestrator, planner, etc.).
+        src: Source component (orchestrator, RED, GREEN, etc.).
         msg: Human-readable event description.
         ctx: Optional extra detail dict.
 

@@ -16,6 +16,7 @@ import requests
 from docker.models.containers import Container
 from django.conf import settings
 from django.db import transaction
+from django.db.utils import OperationalError
 from django.utils import timezone as dj_timezone
 
 from apps.orchestrator.models import Pipeline, PipelineStage
@@ -29,15 +30,12 @@ class RepoConfig(TypedDict):
 
 
 STAGE_ORDER: list[str] = [
-    "planner",
-    "plan_reviewer",
-    "test_builder",
-    "testing_align_red",
-    "coder",
-    "code_reviewer",
-    "testing_green",
-    "pr_writer",
-    "pr_reviewer",
+    "init",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
 ]
 
 REPO_CONFIG: list[RepoConfig] = [
@@ -79,6 +77,8 @@ COPY_SOURCES: list[str] = [
 _COPY_SOURCES_BASE: str = "/"
 
 MIN_DISK_SPACE_GB: int = 10
+
+PIPELINE_MAX_RETRIES: int = settings.PIPELINE_MAX_RETRIES
 
 _wake_event = threading.Event()
 _opencode_server_containers: dict[str, Container] = {}
@@ -164,8 +164,14 @@ def _reap_orphaned_pipelines() -> None:
     have been orphaned by a previous crash — reset them so they don't
     block the queue forever.
     """
-    orphaned = Pipeline.objects.filter(status="running")
-    count = orphaned.count()
+    try:
+        orphaned = Pipeline.objects.filter(status="running")
+        count = orphaned.count()
+    except OperationalError:
+        # Transient DB failures (mount/permissions) should not kill the
+        # orchestrator thread loop.
+        logger.warning("Skipping orphan reaping due to transient DB error")
+        return
     if not count:
         return
     logger.warning("Reaping %d orphaned pipeline(s) from previous run", count)
@@ -249,6 +255,13 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
 
 def advance_pipeline(pipeline: Pipeline) -> None:
     """Advance a running pipeline to its next stage or mark it completed."""
+    # The orchestrator loop can continue executing a stage that was
+    # already mid-flight when an abort request marks the pipeline as
+    # cancelled. Do not attempt any further stage transitions once the
+    # pipeline is no longer actively running.
+    if pipeline.status != "running":
+        return
+
     current_stage = pipeline.current_stage
 
     if not current_stage:
@@ -271,7 +284,29 @@ def advance_pipeline(pipeline: Pipeline) -> None:
             _complete_pipeline(pipeline)
             return
 
-    stage = pipeline.stages.get(name=next_stage_name)
+    try:
+        stage = pipeline.stages.get(name=next_stage_name)
+    except PipelineStage.DoesNotExist:
+        # Graceful recovery: if no stage rows exist at all, create them
+        # and retry.  This handles the case where the orchestrator
+        # crashed before _create_stages was called during
+        # _execute_pipeline, leaving the pipeline with zero stages.
+        if not pipeline.stages.exists():
+            _create_stages(pipeline)
+            stage = pipeline.stages.get(name=next_stage_name)
+        else:
+            pipeline.status = "failed"
+            pipeline.save(update_fields=["status", "updated_at"])
+            _write_orchestrator_log(
+                pipeline,
+                "ERROR",
+                (
+                    "Pipeline stage row missing for expected stage "
+                    f"'{next_stage_name}'"
+                ),
+            )
+            _teardown_workspace(pipeline)
+            return
     if stage.status in ("completed", "failed"):
         return
     if stage.retry_after and stage.retry_after > dj_timezone.now():
@@ -298,6 +333,27 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
 
     state_file = _state_file_path(pipeline)
     _write_state_field(state_file, "current_stage", stage.name)
+
+    # The init stage is responsible for pipeline setup (workspace, server).
+    # Only run setup if the workspace has not already been created (e.g. by
+    # start_pipeline / _execute_pipeline).
+    if stage.name == "init" and not _state_file_path(pipeline).exists():
+        try:
+            _create_workspace(pipeline)
+            _start_opencode_server(pipeline)
+            _wait_for_server_health(pipeline)
+        except OSError as exc:
+            _teardown_workspace(pipeline)
+            stage.status = "failed"
+            stage.save(update_fields=["status"])
+            pipeline.status = "failed"
+            pipeline.save(update_fields=["status", "updated_at"])
+            _write_orchestrator_log(
+                pipeline,
+                "ERROR",
+                f"Failed to create workspace during init stage: {exc}",
+            )
+            return
 
     try:
         exit_code, blocked = _spawn_agent_container(pipeline, stage)
@@ -336,7 +392,7 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
                 "INFO",
                 f"Stage {stage.name} completed in {duration:.1f}s",
             )
-            if stage.name == "coder":
+            if stage.name == "GREEN":
                 _run_formatters(pipeline)
             advance_pipeline(pipeline)
         else:
@@ -361,7 +417,7 @@ def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
     """Handle a failed stage with retry logic (non-blocking)."""
     stage.retry_count += 1
 
-    if stage.retry_count > settings.PIPELINE_MAX_RETRIES:
+    if stage.retry_count > PIPELINE_MAX_RETRIES:
         stage.status = "failed"
         pipeline.status = "failed"
         with transaction.atomic():
@@ -374,7 +430,10 @@ def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
         )
         return
 
-    backoff_idx = min(stage.retry_count - 1, len(settings.PIPELINE_RETRY_BACKOFF_SECONDS) - 1)
+    backoff_idx = min(
+        stage.retry_count - 1,
+        len(settings.PIPELINE_RETRY_BACKOFF_SECONDS) - 1,
+    )
     delay = settings.PIPELINE_RETRY_BACKOFF_SECONDS[backoff_idx]
     stage.status = "pending"
     stage.retry_after = dj_timezone.now() + dj_timezone.timedelta(seconds=delay)
@@ -386,7 +445,7 @@ def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
     _write_orchestrator_log(
         pipeline,
         "WARN",
-        f"Stage {stage.name} retry {stage.retry_count}/{settings.PIPELINE_MAX_RETRIES} in {delay}s",
+        f"Stage {stage.name} retry {stage.retry_count}/{PIPELINE_MAX_RETRIES} in {delay}s",
     )
 
 
@@ -851,7 +910,7 @@ def _run_formatters(pipeline: Pipeline) -> None:
 def _create_pr(pipeline: Pipeline) -> None:
     """Create a GitHub PR from the PR Writer's payload."""
     payload = None
-    pr_writer_stage = pipeline.stages.filter(name="pr_writer").first()
+    pr_writer_stage = pipeline.stages.filter(name="PR writer").first()
     if pr_writer_stage and pr_writer_stage.output:
         payload = pr_writer_stage.output
 

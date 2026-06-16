@@ -16,6 +16,16 @@ from apps.orchestrator.state.models import (
 )
 
 
+EXPECTED_STAGE_NAMES = (
+    "init",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
+)
+
+
 class TestStageState:
     def test_defaults(self):
         s = StageState()
@@ -52,7 +62,8 @@ class TestErrorEntry:
 
 class TestPipelineState:
     def test_default_creation(self):
-        """Default PipelineState has pending status and 11 stages."""
+        """Default PipelineState has pending status and 5 stages."""
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         p = PipelineState(
             invocation_name="test-branch",
             pipeline_id="11111111-1111-1111-1111-111111111111",
@@ -60,9 +71,8 @@ class TestPipelineState:
         assert p.status == "pending"
         assert p.invocation_name == "test-branch"
         assert p.pipeline_id == "11111111-1111-1111-1111-111111111111"
-        assert len(p.stages) == 11
-        for name in STAGE_NAMES:
-            assert name in p.stages
+        assert len(p.stages) == len(EXPECTED_STAGE_NAMES)
+        assert set(p.stages.keys()) == set(EXPECTED_STAGE_NAMES)
         assert p.created_at is not None
         assert p.updated_at is not None
 
@@ -82,6 +92,7 @@ class TestPipelineState:
 
     def test_to_dict_contains_all_top_level_keys(self):
         """The serialised dict must match the state.json schema."""
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         p = PipelineState(
             invocation_name="test",
             pipeline_id="abc-123",
@@ -106,7 +117,8 @@ class TestPipelineState:
         assert set(d.keys()) == expected_keys
         assert d["pipeline_id"] == "abc-123"
         assert d["status"] == "queued"
-        assert d["stages"]["planner"]["status"] == "pending"
+        assert "RED" in d["stages"]
+        assert d["stages"]["RED"]["status"] == "pending"
 
     def test_to_dict_is_json_serializable(self):
         """The output of to_dict must be valid JSON."""
@@ -114,7 +126,7 @@ class TestPipelineState:
             invocation_name="test",
             pipeline_id="abc-123",
         )
-        p.errors.append(ErrorEntry(stage="coder", message="oops"))
+        p.errors.append(ErrorEntry(stage="GREEN", message="oops"))
         d = p.to_dict()
         json_str = json.dumps(d)
         parsed = json.loads(json_str)
@@ -130,16 +142,17 @@ class TestPipelineState:
         assert p.pipeline_id == "min-1"
         assert p.invocation_name == "minimal"
         assert p.status == "queued"
-        assert len(p.stages) == 11
-        assert p.stages["planner"].status == "pending"
+        assert set(p.stages.keys()) == {"RED", "GREEN", "REFRACTOR", "compilance", "PR writer"}
+        assert p.stages["RED"].status == "pending"
 
     def test_from_dict_full(self):
         """from_dict with a complete dict preserves all fields."""
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         data = {
             "pipeline_id": "full-1",
             "invocation_name": "full-test",
             "status": "running",
-            "current_stage": "coder",
+            "current_stage": "GREEN",
             "iteration_count": 3,
             "user_input_pending": True,
             "user_input_prompt": "What color?",
@@ -152,52 +165,55 @@ class TestPipelineState:
                 "pr_payload": "artifacts/pr_payload.json",
             },
             "stages": {
-                "planner": {"status": "completed", "output": {"done": True}, "retry_count": 1},
+                "RED": {"status": "completed", "output": {"done": True}, "retry_count": 1},
             },
             "errors": [
-                {"stage": "planner", "message": "timeout", "timestamp": "2026-06-01T00:00:00Z"}
+                {"stage": "RED", "message": "timeout", "timestamp": "2026-06-01T00:00:00Z"}
             ],
             "created_at": "2026-06-01T00:00:00Z",
             "updated_at": "2026-06-01T00:00:00Z",
         }
         p = PipelineState.from_dict(data)
         assert p.status == "running"
-        assert p.current_stage == "coder"
+        assert p.current_stage == "GREEN"
         assert p.iteration_count == 3
         assert p.user_input_pending is True
         assert p.user_input_prompt == "What color?"
-        assert p.stages["planner"].status == "completed"
-        assert p.stages["planner"].output == {"done": True}
-        assert p.stages["planner"].retry_count == 1
+        assert "RED" in p.stages
+        assert p.stages["RED"].status == "completed"
+        assert p.stages["RED"].output == {"done": True}
+        assert p.stages["RED"].retry_count == 1
         assert len(p.errors) == 1
-        assert p.errors[0].stage == "planner"
+        assert p.errors[0].stage == "RED"
         assert p.errors[0].message == "timeout"
-        assert p.stages["plan_reviewer"].status == "pending"
+        assert "GREEN" in p.stages
+        assert p.stages["GREEN"].status == "pending"
 
     def test_round_trip_preserves_custom_state(self):
         """to_dict -> from_dict round-trip preserves all custom values."""
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES
         p = PipelineState(
             invocation_name="rt-test",
             pipeline_id="rt-1",
             status="running",
-            current_stage="test_builder",
+            current_stage="REFRACTOR",
             iteration_count=2,
         )
-        p.stages["planner"].status = "completed"
-        p.stages["planner"].output = {"result": "plan.md"}
-        p.stages["plan_reviewer"].status = "completed"
-        p.stages["test_builder"].status = "running"
-        p.errors.append(ErrorEntry(stage="planner", message="slow"))
+        p.stages["RED"].status = "completed"
+        p.stages["RED"].output = {"result": "plan.md"}
+        p.stages["GREEN"].status = "completed"
+        p.stages["REFRACTOR"].status = "running"
+        p.errors.append(ErrorEntry(stage="RED", message="slow"))
 
         restored = PipelineState.from_dict(p.to_dict())
         assert restored.pipeline_id == p.pipeline_id
         assert restored.status == "running"
-        assert restored.current_stage == "test_builder"
+        assert restored.current_stage == "REFRACTOR"
         assert restored.iteration_count == 2
-        assert restored.stages["planner"].status == "completed"
-        assert restored.stages["planner"].output == {"result": "plan.md"}
-        assert restored.stages["plan_reviewer"].status == "completed"
-        assert restored.stages["test_builder"].status == "running"
+        assert restored.stages["RED"].status == "completed"
+        assert restored.stages["RED"].output == {"result": "plan.md"}
+        assert restored.stages["GREEN"].status == "completed"
+        assert restored.stages["REFRACTOR"].status == "running"
         assert len(restored.errors) == 1
 
 
@@ -212,6 +228,4 @@ class TestConstants:
         assert set(TERMINAL_STATUSES) == expected
 
     def test_stage_order(self):
-        assert len(STAGE_NAMES) == 11
-        assert STAGE_NAMES[0] == "planner"
-        assert STAGE_NAMES[-1] == "pr_reviewer"
+        assert STAGE_NAMES == ("RED", "GREEN", "REFRACTOR", "compilance", "PR writer")

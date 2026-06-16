@@ -21,6 +21,16 @@ from apps.orchestrator import orchestrator
 from apps.orchestrator.models import Pipeline, PipelineStage
 
 
+EXPECTED_STAGE_ORDER = [
+    "init",
+    "RED",
+    "GREEN",
+    "REFRACTOR",
+    "compilance",
+    "PR writer",
+]
+
+
 # ── helpers ────────────────────────────────────────────────────────────────
 
 class MockContainer:
@@ -142,6 +152,7 @@ class TestRunStageUsesServerNotDocker:
     ) -> None:
         """When _check_blocked_state returns True, the pipeline stops advancing
         and awaits user input."""
+        assert orchestrator.STAGE_ORDER == EXPECTED_STAGE_ORDER
         pipeline = Pipeline.objects.create(
             invocation_name="blocked-integration",
             description="test",
@@ -151,7 +162,7 @@ class TestRunStageUsesServerNotDocker:
         orchestrator._create_workspace(pipeline)
         orchestrator._create_stages(pipeline)
 
-        stage = pipeline.stages.get(name="planner")
+        stage = pipeline.stages.get(name="RED")
 
         def mock_post(pipeline: Pipeline, path: str, **kwargs) -> dict:
             return {"id": "session-1"}
@@ -186,6 +197,7 @@ class TestRunStageUsesServerNotDocker:
         monkeypatch: MonkeyPatch,
     ) -> None:
         """When the HTTP call fails (OSError), _handle_stage_failure is invoked."""
+        assert orchestrator.STAGE_ORDER == EXPECTED_STAGE_ORDER
         pipeline = Pipeline.objects.create(
             invocation_name="failure-integration",
             description="test",
@@ -195,7 +207,7 @@ class TestRunStageUsesServerNotDocker:
         orchestrator._create_workspace(pipeline)
         orchestrator._create_stages(pipeline)
 
-        stage = pipeline.stages.get(name="planner")
+        stage = pipeline.stages.get(name="RED")
 
         posts_called: list[str] = []
 
@@ -311,7 +323,7 @@ class TestOpencodeServerLifecycle:
         )
         for name in orchestrator.STAGE_ORDER:
             PipelineStage.objects.create(pipeline=pipeline2, name=name, status="completed")
-        pipeline2.current_stage = "pr_reviewer"
+        pipeline2.current_stage = "PR writer"
         pipeline2.save(update_fields=["current_stage"])
         workspace2 = Path(settings.WORKSPACE_ROOT) / str(pipeline2.id)
         workspace2.mkdir(parents=True, exist_ok=True)
