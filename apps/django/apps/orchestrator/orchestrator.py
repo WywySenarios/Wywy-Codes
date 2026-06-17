@@ -256,6 +256,12 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
         pipeline.invocation_name,
     )
 
+    _write_orchestrator_log(
+        pipeline,
+        "INFO",
+        "Pipeline execution started",
+    )
+
     try:
         _create_workspace(pipeline)
         _start_opencode_server(pipeline)
@@ -319,11 +325,24 @@ def _try_recover_retry(pipeline: Pipeline, stage: PipelineStage) -> bool:
 
 def advance_pipeline(pipeline: Pipeline) -> None:
     """Advance a running pipeline to its next stage or mark it completed."""
+    _write_orchestrator_log(
+        pipeline,
+        "DEBUG",
+        f"advance_pipeline called: status={pipeline.status}, "
+        f"current_stage={pipeline.current_stage}",
+    )
+
     # The orchestrator loop can continue executing a stage that was
     # already mid-flight when an abort request marks the pipeline as
     # cancelled. Do not attempt any further stage transitions once the
     # pipeline is no longer actively running.
     if pipeline.status != "running":
+        _write_orchestrator_log(
+            pipeline,
+            "WARN",
+            f"Pipeline no longer running (status={pipeline.status}) — "
+            f"advance_pipeline call discarded",
+        )
         return
 
     current_stage = pipeline.current_stage
@@ -546,6 +565,10 @@ def _teardown_workspace(pipeline: Pipeline) -> None:
     if workspace_dir.exists():
         _write_orchestrator_log(pipeline, "INFO", "Tearing down workspace")
         shutil.rmtree(str(workspace_dir), ignore_errors=True)
+    _write_orchestrator_log(
+        pipeline, "INFO",
+        f"Pipeline ended (status={pipeline.status})",
+    )
 
 
 def _check_disk_space(workspace_root: str) -> None:

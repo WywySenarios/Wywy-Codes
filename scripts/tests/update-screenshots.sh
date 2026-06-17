@@ -12,10 +12,17 @@ npx playwright install chromium --with-deps 2>/dev/null || npx playwright instal
 
 echo ""
 echo "=== Regenerating screenshot baselines ==="
-npx playwright test \
-  --config tests/e2e/playwright.config.ts \
-  --update-snapshots $1 \
-  tests/e2e/
+if [ $# -ge 1 ]; then
+  npx playwright test \
+    --config tests/e2e/playwright.config.ts \
+    --update-snapshots "$1" \
+    tests/e2e/
+else
+  npx playwright test \
+    --config tests/e2e/playwright.config.ts \
+    --update-snapshots \
+    tests/e2e/
+fi
 
 echo ""
 echo "=== Done ==="

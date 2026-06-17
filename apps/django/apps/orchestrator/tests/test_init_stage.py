@@ -174,10 +174,11 @@ class TestInitStageFailureResilience:
         # ── Assert exactly ONE CRITICAL log entry — the pipeline
         #    must stop at the first failure and not produce additional
         #    ERROR/CRITICAL entries for the same incident.
-        assert len(log_entries) >= 1, (
-            "Expected at least one orchestrator log entry"
+        assert len(log_entries) >= 2, (
+            "Expected at least two orchestrator log entries "
+            f"(CRITICAL + Pipeline ended). Got: {len(log_entries)}"
         )
-        level, msg = log_entries[-1]
+        level, msg = log_entries[-2]
         assert level == "CRITICAL", (
             f"Terminal init-stage failures must log at CRITICAL level "
             f"so operators can distinguish them from non-terminal "
@@ -186,13 +187,21 @@ class TestInitStageFailureResilience:
         assert "Non-OSError" in msg, (
             f"Log message must describe the failure. Got: {msg}"
         )
-        # Ensure no double-failure: the last entry IS the failure; if
-        # there was a prior CRITICAL from the same pipeline incident
-        # something went wrong.
+        # Ensure no double-failure: there must be exactly one CRITICAL.
         criticals = [lvl for lvl, _ in log_entries if lvl == "CRITICAL"]
         assert len(criticals) == 1, (
             f"Expected exactly 1 CRITICAL log entry for this pipeline "
             f"failure. Got {len(criticals)}: {criticals}"
+        )
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )
 
 
@@ -322,10 +331,11 @@ class TestInitStageApiErrorFeedback:
 
         # ── Assert exactly ONE CRITICAL log entry.  A missing stage
         #    row is a terminal pipeline failure — ERROR is too weak.
-        assert len(log_entries) >= 1, (
-            "Expected at least one orchestrator log entry"
+        assert len(log_entries) >= 2, (
+            "Expected at least two orchestrator log entries "
+            f"(CRITICAL + Pipeline ended). Got: {len(log_entries)}"
         )
-        level, msg = log_entries[-1]
+        level, msg = log_entries[-2]
         assert level == "CRITICAL", (
             f"Missing init stage row must log at CRITICAL level, "
             f"not {level}. Got: {level}"
@@ -337,4 +347,14 @@ class TestInitStageApiErrorFeedback:
         assert len(criticals) == 1, (
             f"Expected exactly 1 CRITICAL log entry for this pipeline "
             f"failure. Got {len(criticals)}: {criticals}"
+        )
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )

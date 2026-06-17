@@ -565,16 +565,27 @@ class TestPipelineExecutionResilience:
             f"raises a non-OSError. Got: {pipeline_queued.status}"
         )
 
-        assert len(log_entries) >= 1, (
-            "Expected at least one CRITICAL orchestrator log entry"
+        assert len(log_entries) >= 2, (
+            "Expected at least two orchestrator log entries "
+            f"(CRITICAL + Pipeline ended). Got: {len(log_entries)}"
         )
-        level, msg = log_entries[-1]
+        level, msg = log_entries[-2]
         assert level == "CRITICAL", (
             f"Expected CRITICAL log level for non-OSError failures. "
             f"Got: {level}"
         )
         assert "RuntimeError" in msg or "Unexpected non-OSError failure" in msg, (
             f"Log message must describe the failure. Got: {msg}"
+        )
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )
 
     def test_execute_pipeline_fatal_stage_creation_error_stays_dead(
@@ -893,19 +904,29 @@ class TestTeardownLogOrder:
         pipeline_queued.refresh_from_db()
         assert pipeline_queued.status == "failed"
 
-        assert len(log_entries) >= 2, (
-            f"Expected at least 2 log entries (teardown + CRITICAL), "
-            f"got {len(log_entries)}: {log_entries}"
+        assert len(log_entries) >= 3, (
+            f"Expected at least 3 log entries (CRITICAL + Teardown + "
+            f"Pipeline ended), got {len(log_entries)}: {log_entries}"
         )
 
-        # THE KEY ASSERTION: "Tearing down workspace" must be the FINAL log.
-        # Currently this fails because the CRITICAL "Failed to create workspace"
-        # message is logged AFTER _teardown_workspace returns.
-        last_level, last_msg = log_entries[-1]
-        assert last_msg == "Tearing down workspace", (
-            f"The final log entry must be 'Tearing down workspace', "
-            f"but got '{last_msg}' (level={last_level}). "
+        # "Tearing down workspace" must be second-to-last — the only
+        # thing after it is the benign "Pipeline ended" notification.
+        second_last_level, second_last_msg = log_entries[-2]
+        assert second_last_msg == "Tearing down workspace", (
+            f"'Tearing down workspace' must be the second-to-last entry, "
+            f"but got '{second_last_msg}' (level={second_last_level}). "
             f"Full log: {log_entries}"
+        )
+
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )
 
         # Verify the CRITICAL error appears BEFORE teardown
@@ -992,16 +1013,29 @@ class TestTeardownLogOrder:
         pipeline_queued.refresh_from_db()
         assert pipeline_queued.status == "failed"
 
-        assert len(log_entries) >= 2, (
-            f"Expected at least 2 log entries, "
-            f"got {len(log_entries)}: {log_entries}"
+        assert len(log_entries) >= 3, (
+            f"Expected at least 3 log entries (CRITICAL + Teardown + "
+            f"Pipeline ended), got {len(log_entries)}: {log_entries}"
         )
 
-        last_level, last_msg = log_entries[-1]
-        assert last_msg == "Tearing down workspace", (
-            f"The final log entry must be 'Tearing down workspace', "
-            f"but got '{last_msg}' (level={last_level}). "
+        # "Tearing down workspace" must be second-to-last — the only
+        # thing after it is the benign "Pipeline ended" notification.
+        second_last_level, second_last_msg = log_entries[-2]
+        assert second_last_msg == "Tearing down workspace", (
+            f"'Tearing down workspace' must be the second-to-last entry, "
+            f"but got '{second_last_msg}' (level={second_last_level}). "
             f"Full log: {log_entries}"
+        )
+
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )
 
         criticals = [(lvl, msg) for lvl, msg in log_entries if lvl == "CRITICAL"]
@@ -1094,16 +1128,29 @@ class TestTeardownLogOrder:
         pipeline_queued.refresh_from_db()
         assert pipeline_queued.status == "failed"
 
-        assert len(log_entries) >= 2, (
-            f"Expected at least 2 log entries, "
-            f"got {len(log_entries)}: {log_entries}"
+        assert len(log_entries) >= 3, (
+            f"Expected at least 3 log entries (CRITICAL + Teardown + "
+            f"Pipeline ended), got {len(log_entries)}: {log_entries}"
         )
 
-        last_level, last_msg = log_entries[-1]
-        assert last_msg == "Tearing down workspace", (
-            f"The final log entry must be 'Tearing down workspace', "
-            f"but got '{last_msg}' (level={last_level}). "
+        # "Tearing down workspace" must be second-to-last — the only
+        # thing after it is the benign "Pipeline ended" notification.
+        second_last_level, second_last_msg = log_entries[-2]
+        assert second_last_msg == "Tearing down workspace", (
+            f"'Tearing down workspace' must be the second-to-last entry, "
+            f"but got '{second_last_msg}' (level={second_last_level}). "
             f"Full log: {log_entries}"
+        )
+
+        # Pipeline ended must be the FINAL orchestrator entry.
+        final_level, final_msg = log_entries[-1]
+        assert final_level == "INFO", (
+            f"Final orchestrator entry must be INFO level, "
+            f"got: {final_level}"
+        )
+        assert final_msg == "Pipeline ended (status=failed)", (
+            f"The final log entry must be 'Pipeline ended (status=failed)', "
+            f"got: '{final_msg}'"
         )
 
         criticals = [(lvl, msg) for lvl, msg in log_entries if lvl == "CRITICAL"]
