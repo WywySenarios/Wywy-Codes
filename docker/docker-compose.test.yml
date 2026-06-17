@@ -16,10 +16,14 @@ services:
           | tee /var/log/Wywy-Website/agentic/test-summary.log 2>/dev/null
         exit $${PIPESTATUS[0]}
   astro:
-    user: root
+    build:
+      context: ..
+      dockerfile: docker/astro/Dockerfile
+      args:
+        CONTAINER_GID: 2523
+      target: test
     volumes:
       - ../apps/astro/src:/app/src:rw
-      - ../apps/astro/package.json:/app/package.json:ro
       - ../apps/astro/tests:/app/tests:rw
       - ../apps/astro/vitest.config.ts:/app/vitest.config.ts:ro
       - ../apps/astro/scripts/test.sh:/app/scripts/test.sh:ro

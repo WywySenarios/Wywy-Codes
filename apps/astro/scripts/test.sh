@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # Agentic frontend test runner — executed inside the astro Docker container.
+# Dependencies and Playwright browsers are pre-installed in the Docker image
+# (target: test in docker/astro/Dockerfile).
 # Invoked by docker-compose.test.yml via /etc/Wywy-Website-Control/run.sh agentic test.
 
 set -euo pipefail
 
 cd /app
-
-echo "=== Installing dependencies ==="
-npm install
-
-echo ""
-echo "=== Playwright browsers (with system deps) ==="
-npx playwright install --with-deps chromium 2>/dev/null || npx playwright install chromium
 
 echo ""
 echo "=== Frontend unit tests (vitest) ==="
