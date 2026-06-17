@@ -1,0 +1,17 @@
+{
+  "include": [
+    "apps",
+    "config",
+    "manage.py"
+  ],
+  "exclude": [
+    "**/.venv",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/node_modules",
+    "astro-dist"
+  ],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Linux"
+}

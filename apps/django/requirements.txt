@@ -8,3 +8,4 @@ pyyaml
 pytest>=8.0
 pytest-django>=4.0
 whitenoise>=6.0
+pyright

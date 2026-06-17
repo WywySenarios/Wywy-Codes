@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir ruff
 
-RUN npm install -g prettier
+RUN npm install -g prettier pyright
 
 RUN pip install --no-cache-dir \
     django>=5.0 \
