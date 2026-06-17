@@ -514,6 +514,7 @@ def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
             "ERROR",
             f"Stage {stage.name} failed after {stage.retry_count} retries",
         )
+        _teardown_workspace(pipeline)
         return
 
     backoff_idx = min(
