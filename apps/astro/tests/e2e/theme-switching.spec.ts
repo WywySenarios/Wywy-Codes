@@ -29,6 +29,34 @@ test.describe("Theme switching", () => {
     expect(afterSecondClick).toBe(initialClass);
   });
 
+  test("body background-color changes when toggling theme — proves CSS cascade resolves correctly", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForLoadState("networkidle");
+
+    const toggle = page.getByRole("button", { name: /toggle theme/i });
+    await expect(toggle).toBeVisible();
+
+    const body = page.locator("body");
+
+    // Read the computed background-color in the initial theme
+    const initialBg = await body.evaluate((el) =>
+      window.getComputedStyle(el).backgroundColor,
+    );
+
+    // Toggle to the other theme
+    await toggle.click();
+    await page.waitForTimeout(300);
+
+    const toggledBg = await body.evaluate((el) =>
+      window.getComputedStyle(el).backgroundColor,
+    );
+
+    // If the CSS cascade is correct, the background-color MUST change.
+    // A failed assertion here means the .dark CSS custom properties are
+    // being overridden by later :root / @theme inline declarations.
+    expect(toggledBg).not.toBe(initialBg);
+  });
+
   test("dashboard renders correctly in light mode", async ({ page }) => {
     await page.goto("/");
     await page.waitForLoadState("networkidle");
