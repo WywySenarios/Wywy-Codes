@@ -18,8 +18,9 @@ class TestPipelineToDict:
 
         expected_keys = {
             "id", "invocation_name", "status", "current_stage",
-            "iteration_count", "user_input_pending", "user_input_request",
-            "pr_url", "description", "created_at", "updated_at",
+            "error_message", "iteration_count", "user_input_pending",
+            "user_input_request", "pr_url", "description",
+            "created_at", "updated_at",
         }
         assert set(data.keys()) == expected_keys
 

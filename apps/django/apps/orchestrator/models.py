@@ -14,6 +14,7 @@ class Pipeline(models.Model):
     current_stage = models.CharField(max_length=50, null=True, blank=True)
     iteration_count = models.IntegerField(default=0)
     user_input_pending = models.BooleanField(default=False)
+    error_message = models.TextField(null=True, blank=True)
     user_input_request = models.JSONField(null=True, blank=True)
     user_input_response = models.TextField(null=True, blank=True)
     pr_url = models.URLField(null=True, blank=True)

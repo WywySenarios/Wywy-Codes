@@ -23,6 +23,11 @@ from apps.orchestrator.models import Pipeline, PipelineStage
 
 logger = logging.getLogger(__name__)
 
+# Tracks pipelines whose workspace has been torn down.
+# Prevents _teardown_workspace from logging and acting multiple times
+# for the same pipeline. Keyed by str(pipeline.id).
+_teardown_completed: set[str] = set()
+
 class RepoConfig(TypedDict):
     name: str
     url: str
@@ -79,6 +84,16 @@ _COPY_SOURCES_BASE: str = "/"
 MIN_DISK_SPACE_GB: int = 10
 
 PIPELINE_MAX_RETRIES: int = settings.PIPELINE_MAX_RETRIES
+
+# Maximum time (seconds) to poll state.json for the agent's response.
+# Default 30 s — agents typically write within a few seconds.  For longer
+# operations the retry mechanism (backed by _try_recover_retry) catches
+# late writes.  Tests may monkeypatch this to a small value to avoid
+# blocking.
+STATE_POLL_TIMEOUT: int = 30
+
+# Interval (seconds) between state.json polls.
+STATE_POLL_INTERVAL: float = 2.0
 
 _wake_event = threading.Event()
 _opencode_server_containers: dict[str, Container] = {}
@@ -198,21 +213,33 @@ def start_pipeline(pipeline: Pipeline) -> None:
         _create_workspace(pipeline)
         _start_opencode_server(pipeline)
         _wait_for_server_health(pipeline)
-    except OSError as exc:
-        _teardown_workspace(pipeline)
+    except Exception as exc:
         pipeline.status = "failed"
         pipeline.save(update_fields=["status", "updated_at"])
         _write_orchestrator_log(
             pipeline,
-            "ERROR",
+            "CRITICAL",
             f"Failed to create workspace: {exc}",
         )
+        _teardown_workspace(pipeline)
         return
 
     pipeline.status = "running"
     pipeline.save(update_fields=["status", "updated_at"])
 
-    _create_stages(pipeline)
+    try:
+        _create_stages(pipeline)
+    except Exception as exc:
+        pipeline.status = "failed"
+        pipeline.save(update_fields=["status", "updated_at"])
+        _write_orchestrator_log(
+            pipeline,
+            "CRITICAL",
+            f"Pipeline execution failed: {exc}",
+        )
+        _teardown_workspace(pipeline)
+        return
+
     _write_orchestrator_log(
         pipeline,
         "INFO",
@@ -233,24 +260,61 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
         _create_workspace(pipeline)
         _start_opencode_server(pipeline)
         _wait_for_server_health(pipeline)
-    except OSError as exc:
-        _teardown_workspace(pipeline)
+        _create_stages(pipeline)
+    except Exception as exc:
         pipeline.status = "failed"
         pipeline.save(update_fields=["status", "updated_at"])
         _write_orchestrator_log(
             pipeline,
-            "ERROR",
-            f"Failed to create workspace: {exc}",
+            "CRITICAL",
+            f"Pipeline execution failed: {exc}",
         )
+        _teardown_workspace(pipeline)
         return
 
-    _create_stages(pipeline)
     _write_orchestrator_log(
         pipeline,
         "INFO",
         f"Pipeline started: {pipeline.invocation_name}",
     )
     advance_pipeline(pipeline)
+
+
+def _try_recover_retry(pipeline: Pipeline, stage: PipelineStage) -> bool:
+    """Check state.json when a stage is in retry — the agent may have written
+    a terminal status between orchestrator ticks.
+
+    If ``state.json`` shows ``"completed"`` or ``"blocked"`` for the stage,
+    update the DB record, set ``pipeline.current_stage``, and return ``True``.
+    The next ``advance_pipeline`` tick will then advance to the following stage.
+
+    Returns ``False`` if the agent still hasn't written a terminal status.
+    """
+    state = _read_state_field(pipeline, "stages")
+    if not isinstance(state, dict):
+        return False
+    stage_state = state.get(stage.name)
+    if not isinstance(stage_state, dict):
+        return False
+    status = stage_state.get("status")
+    if status == "completed":
+        stage.status = "completed"
+        stage.retry_after = None
+        stage.finished_at = dj_timezone.now()
+        pipeline.current_stage = stage.name
+        stage.save(update_fields=["status", "retry_after", "finished_at"])
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+        return True
+    if status == "blocked":
+        stage.status = "blocked"
+        stage.retry_after = None
+        stage.finished_at = dj_timezone.now()
+        pipeline.current_stage = stage.name
+        pipeline.user_input_pending = True
+        stage.save(update_fields=["status", "retry_after", "finished_at"])
+        pipeline.save(update_fields=["current_stage", "user_input_pending", "updated_at"])
+        return True
+    return False
 
 
 def advance_pipeline(pipeline: Pipeline) -> None:
@@ -288,20 +352,32 @@ def advance_pipeline(pipeline: Pipeline) -> None:
         stage = pipeline.stages.get(name=next_stage_name)
     except PipelineStage.DoesNotExist:
         pipeline.status = "failed"
-        pipeline.save(update_fields=["status", "updated_at"])
+        pipeline.error_message = (
+            "Pipeline stage row missing for expected stage "
+            f"'{next_stage_name}'"
+        )
+        pipeline.save(update_fields=["status", "error_message", "updated_at"])
         _write_orchestrator_log(
             pipeline,
-            "ERROR",
-            (
-                "Pipeline stage row missing for expected stage "
-                f"'{next_stage_name}'"
-            ),
+            "CRITICAL",
+            pipeline.error_message,
         )
         _teardown_workspace(pipeline)
         return
     if stage.status in ("completed", "failed"):
         return
     if stage.retry_after and stage.retry_after > dj_timezone.now():
+        # The agent may have written a terminal status between ticks.
+        # Re-check state.json before blocking on the retry guard.
+        if not _try_recover_retry(pipeline, stage):
+            return
+        # Recovery succeeded — next tick will advance to the following stage.
+        _write_orchestrator_log(
+            pipeline,
+            "INFO",
+            f"Recovered stage {stage.name} from retry via state.json "
+            f"(status={stage.status})",
+        )
         return
 
     _run_stage(pipeline, stage)
@@ -334,17 +410,17 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
             _create_workspace(pipeline)
             _start_opencode_server(pipeline)
             _wait_for_server_health(pipeline)
-        except OSError as exc:
-            _teardown_workspace(pipeline)
+        except Exception as exc:
             stage.status = "failed"
             stage.save(update_fields=["status"])
             pipeline.status = "failed"
             pipeline.save(update_fields=["status", "updated_at"])
             _write_orchestrator_log(
                 pipeline,
-                "ERROR",
+                "CRITICAL",
                 f"Failed to create workspace during init stage: {exc}",
             )
+            _teardown_workspace(pipeline)
             return
 
     try:
@@ -456,8 +532,15 @@ def _complete_pipeline(pipeline: Pipeline) -> None:
 def _teardown_workspace(pipeline: Pipeline) -> None:
     """Remove workspace directory after pipeline completion or cancellation.
 
+    Idempotent — once teardown has been initiated for a pipeline, subsequent
+    calls exit immediately without logging or any further side effects.
+
     Logs survive independently at /var/log/Wywy-Website/agentic/{pipeline_id}/.
     """
+    key = str(pipeline.id)
+    if key in _teardown_completed:
+        return
+    _teardown_completed.add(key)
     _stop_opencode_server(pipeline)
     workspace_dir = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
     if workspace_dir.exists():
@@ -850,6 +933,26 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
         },
     )
 
+    # ── Poll state.json until the agent writes a terminal status ────────
+    state_path = _state_file_path(pipeline)
+    poll_deadline = time.time() + STATE_POLL_TIMEOUT
+    is_blocked = False
+    while time.time() < poll_deadline:
+        try:
+            state = json.loads(state_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            time.sleep(STATE_POLL_INTERVAL)
+            continue
+        stage_state = state.get("stages", {}).get(stage.name, {})
+        status = stage_state.get("status")
+        if status in ("completed", "blocked", "failed"):
+            is_blocked = status == "blocked"
+            break
+        if _check_blocked_state(pipeline, stage):
+            is_blocked = True
+            break
+        time.sleep(STATE_POLL_INTERVAL)
+
     # Capture session messages as stage log
     try:
         messages = _opencode_get(pipeline, f"/session/{session_id}/message")
@@ -857,7 +960,6 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
     except Exception:
         logger.warning("Failed to capture session messages for stage %s", stage.name)
 
-    is_blocked = _check_blocked_state(pipeline, stage)
     return 0, is_blocked
 
 

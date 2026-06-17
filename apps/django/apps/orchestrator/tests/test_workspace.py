@@ -404,6 +404,60 @@ class TestTeardown:
         orchestrator._teardown_workspace(pipeline_completed)
         assert not workspace.exists()
 
+    def test_teardown_idempotent_logs_once(
+        self,
+        pipeline_completed: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """_teardown_workspace must log "Tearing down workspace" only once.
+
+        Once teardown has completed for a pipeline, subsequent calls must
+        exit immediately without logging or any further side effects.
+
+        Regression for: Tearing down workspace logged multiple times when
+        _teardown_workspace is called again after the workspace dir has
+        been recreated (or the first call partially failed).
+        """
+        log_entries: list[str] = []
+
+        def _track_log(pipeline, level, msg, **kwargs):
+            log_entries.append(msg)
+
+        monkeypatch.setattr(
+            orchestrator, "_write_orchestrator_log", _track_log,
+        )
+
+        workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline_completed.id)
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "state").mkdir(exist_ok=True)
+        (workspace / "state" / "state.json").write_text("{}")
+
+        # First call — must log "Tearing down workspace" and remove directory
+        orchestrator._teardown_workspace(pipeline_completed)
+        assert not workspace.exists()
+        assert log_entries.count("Tearing down workspace") == 1
+
+        # Recreate the workspace to simulate a scenario where teardown
+        # is called again (e.g. partial failure, race, re-entry).
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "state").mkdir(exist_ok=True)
+        (workspace / "state" / "state.json").write_text("{}")
+
+        # Second call — must be a no-op (immediate exit), no log, no removal
+        orchestrator._teardown_workspace(pipeline_completed)
+
+        assert log_entries.count("Tearing down workspace") == 1, (
+            f"Expected exactly 1 'Tearing down workspace' log entry, "
+            f"got {log_entries.count('Tearing down workspace')}: {log_entries}"
+        )
+        # The workspace should NOT have been removed by the second call
+        assert workspace.exists(), (
+            "Workspace should still exist after the second call — "
+            "it should have been a no-op"
+        )
+
 
 class TestSymlinks:
     def test_symlinks_preserved(
@@ -432,6 +486,177 @@ class TestSymlinks:
         finally:
             link_path.unlink(missing_ok=True)
 
+
+class TestPipelineExecutionResilience:
+    def test_execute_pipeline_fails_on_non_oserror(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """When a non-OSError exception escapes the try block,
+        _execute_pipeline must catch it, log at CRITICAL level,
+        and fail the pipeline gracefully.
+
+        Several code paths inside the try block can raise non-OSError
+        exceptions:
+
+        * ``_start_opencode_server`` → ``docker.errors.DockerException``
+          (daemon unreachable, image not found, API error).
+        * ``_start_opencode_server`` → ``RuntimeError`` if a server
+          container already exists for this pipeline (line 732).
+        * ``_wait_for_server_health`` → ``RuntimeError`` if the server
+          never becomes healthy (line 799).
+        * ``_create_workspace`` → ``subprocess.TimeoutExpired`` if the
+          git branch creation ``subprocess.run`` times out (line 541).
+
+        Currently _execute_pipeline only catches ``OSError``, so any of
+        these propagates to the orchestrator loop's catch-all
+        ``except Exception``, which logs but does NOT set the pipeline
+        status to "failed".  The pipeline is left in ``'running'`` state
+        without any PipelineStage rows, causing the "Pipeline stage row
+        missing for expected stage 'init'" cascade on the next tick.
+
+        The fix: catch ``Exception`` instead of ``OSError``, log at
+        ``CRITICAL`` level, and fail the pipeline.
+
+        Regression test for: Pipeline stage row missing after workspace
+        copy failure.
+        """
+        from apps.orchestrator.orchestrator import _execute_pipeline
+
+        log_entries: list[tuple[str, str]] = []
+
+        def _track_log(pipeline: Pipeline, level: str, msg: str, **kwargs) -> None:
+            log_entries.append((level, msg))
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._write_orchestrator_log",
+            _track_log,
+        )
+
+        def _failing_create_workspace(pipeline: Pipeline) -> None:
+            raise RuntimeError("Unexpected non-OSError failure")
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._create_workspace",
+            _failing_create_workspace,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._start_opencode_server",
+            lambda p: None,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._wait_for_server_health",
+            lambda p: None,
+        )
+
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        # The fix must catch the RuntimeError, log it at CRITICAL level,
+        # and fail the pipeline — no exception should propagate.
+        _execute_pipeline(pipeline_queued)
+
+        pipeline_queued.refresh_from_db()
+        assert pipeline_queued.status == "failed", (
+            "Pipeline must be set to 'failed' even when _create_workspace "
+            f"raises a non-OSError. Got: {pipeline_queued.status}"
+        )
+
+        assert len(log_entries) >= 1, (
+            "Expected at least one CRITICAL orchestrator log entry"
+        )
+        level, msg = log_entries[-1]
+        assert level == "CRITICAL", (
+            f"Expected CRITICAL log level for non-OSError failures. "
+            f"Got: {level}"
+        )
+        assert "RuntimeError" in msg or "Unexpected non-OSError failure" in msg, (
+            f"Log message must describe the failure. Got: {msg}"
+        )
+
+    def test_execute_pipeline_fatal_stage_creation_error_stays_dead(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        patched_copy_sources: dict[str, str],
+    ) -> None:
+        """When _create_stages raises after workspace setup, the pipeline
+        MUST NOT remain in 'running' status.
+
+        The try/except in _execute_pipeline covers only the workspace
+        creation phase (_create_workspace, _start_opencode_server,
+        _wait_for_server_health).  _create_stages and advance_pipeline
+        are OUTSIDE the try block.  If either raises, the exception
+        propagates out of _execute_pipeline, leaving the pipeline in
+        ``'running'`` status.
+
+        On the next orchestrator tick the pipeline is found as
+        ``status="running"`` → the loop calls advance_pipeline → the
+        stage row does not exist (because _create_stages never completed)
+        → ``"Pipeline stage row missing for expected stage 'init'"``
+        → the pipeline is finally set to ``'failed'`` one tick too late.
+
+        During that extra tick the opencode server is running, the
+        pipeline is in an inconsistent state (no stage rows), and any
+        monitoring or UI that watches ``status="running"`` pipelines
+        sees a zombie.
+
+        RED: This test proves the gap.  _execute_pipeline currently
+        lets the exception fly, the pipeline stays ``'running'``, and
+        the assertion ``status != "running"`` fails.
+
+        See orchestrator.py:239-268 — the workspace-creation try/except
+        must also guard _create_stages and advance_pipeline.
+        """
+        from apps.orchestrator.orchestrator import _execute_pipeline
+
+        # ── Arrange: pipeline in the state the orchestrator loop
+        #    would have set before calling _execute_pipeline ──
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._start_opencode_server",
+            lambda p: None,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._wait_for_server_health",
+            lambda p: None,
+        )
+
+        def _failing_create_stages(pipeline: Pipeline) -> None:
+            raise RuntimeError(
+                "Simulated unrecoverable failure in _create_stages"
+            )
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._create_stages",
+            _failing_create_stages,
+        )
+
+        # ── Act ──
+        # _execute_pipeline currently does not catch this exception.
+        # We catch it here so we can inspect the pipeline state
+        # after the failed call.
+        try:
+            _execute_pipeline(pipeline_queued)
+        except RuntimeError:
+            pass
+
+        # ── Assert ──
+        pipeline_queued.refresh_from_db()
+        assert pipeline_queued.status != "running", (
+            "RED: Pipeline MUST NOT remain 'running' after "
+            "_create_stages fails. The orchestrator loop would "
+            "retry it on the next tick, causing a zombie pipeline "
+            "that cycles through 'Pipeline stage row missing for "
+            "expected stage' forever."
+        )
 
 class TestOpenCodeConfig:
     def test_opencode_config_no_chown(
@@ -581,3 +806,317 @@ class TestLockedNonSecrets:
                 orchestrator._create_workspace(pipeline_queued)
         finally:
             locked.chmod(0o755)
+
+
+class TestTeardownLogOrder:
+    """Teardown logs must always be the final orchestrator log entry for a pipeline."""
+
+    def test_teardown_log_is_final_on_start_pipeline_failure(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """When start_pipeline fails during workspace creation, the
+        "Tearing down workspace" log must be the FINAL orchestrator
+        log entry — not followed by a CRITICAL error.
+
+        Current bug: in start_pipeline's except handler (orchestrator.py:206-215)
+        and _execute_pipeline's except handler (orchestrator.py:242-250),
+        _teardown_workspace is called BEFORE _write_orchestrator_log for
+        the "Failed to create workspace" CRITICAL message.
+
+        This means operators see::
+
+            INFO   Tearing down workspace
+            CRITICAL  Failed to create workspace: ...
+
+        The correct order must be::
+
+            CRITICAL  Failed to create workspace: ...
+            INFO   Tearing down workspace
+
+        Because teardown is the terminal operation — nothing should log
+        after the workspace has been cleaned up.
+        """
+        import shutil as shutil_mod
+        from apps.orchestrator.orchestrator import start_pipeline
+
+        log_entries: list[tuple[str, str]] = []
+
+        def _track_log(
+            pipeline: Pipeline, level: str, msg: str, **kwargs: object,
+        ) -> None:
+            log_entries.append((level, msg))
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._write_orchestrator_log",
+            _track_log,
+        )
+
+        # Create a minimal source tree so _create_workspace succeeds
+        # up to the copytree call
+        source1 = tmp_path / "source"
+        source1.mkdir()
+        (source1 / "file.txt").write_text("hello")
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator.COPY_SOURCES",
+            [str(source1)],
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._COPY_SOURCES_BASE",
+            str(tmp_path),
+        )
+
+        # Patch shutil.copytree to fail — this means _create_workspace
+        # will create the directory structure, then fail during copytree,
+        # so the workspace dir EXISTS when _teardown_workspace runs.
+        def _failing_copytree(src: str, dst: str, **kwargs: object) -> None:
+            raise PermissionError("Simulated copytree failure")
+
+        monkeypatch.setattr(shutil_mod, "copytree", _failing_copytree)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._start_opencode_server",
+            lambda p: None,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._wait_for_server_health",
+            lambda p: None,
+        )
+
+        start_pipeline(pipeline_queued)
+
+        pipeline_queued.refresh_from_db()
+        assert pipeline_queued.status == "failed"
+
+        assert len(log_entries) >= 2, (
+            f"Expected at least 2 log entries (teardown + CRITICAL), "
+            f"got {len(log_entries)}: {log_entries}"
+        )
+
+        # THE KEY ASSERTION: "Tearing down workspace" must be the FINAL log.
+        # Currently this fails because the CRITICAL "Failed to create workspace"
+        # message is logged AFTER _teardown_workspace returns.
+        last_level, last_msg = log_entries[-1]
+        assert last_msg == "Tearing down workspace", (
+            f"The final log entry must be 'Tearing down workspace', "
+            f"but got '{last_msg}' (level={last_level}). "
+            f"Full log: {log_entries}"
+        )
+
+        # Verify the CRITICAL error appears BEFORE teardown
+        criticals = [(lvl, msg) for lvl, msg in log_entries if lvl == "CRITICAL"]
+        assert len(criticals) >= 1, (
+            f"Expected at least 1 CRITICAL log entry, "
+            f"got {len(criticals)}: {criticals}"
+        )
+        crit_idx = next(
+            i for i, (lvl, _) in enumerate(log_entries) if lvl == "CRITICAL"
+        )
+        teardown_idx = next(
+            i for i, (_, msg) in enumerate(log_entries)
+            if msg == "Tearing down workspace"
+        )
+        assert crit_idx < teardown_idx, (
+            f"CRITICAL log (at index {crit_idx}) must appear BEFORE "
+            f"'Tearing down workspace' (at index {teardown_idx}). "
+            f"Full log: {log_entries}"
+        )
+
+    def test_teardown_log_is_final_on_execute_pipeline_failure(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Same invariant via _execute_pipeline: "Tearing down workspace"
+        must be the final log when workspace creation fails.
+
+        _execute_pipeline (orchestrator.py:242-250) has the identical
+        bug as start_pipeline — _teardown_workspace is called before
+        the CRITICAL "Failed to create workspace" log.
+        """
+        import shutil as shutil_mod
+        from apps.orchestrator.orchestrator import _execute_pipeline
+
+        log_entries: list[tuple[str, str]] = []
+
+        def _track_log(
+            pipeline: Pipeline, level: str, msg: str, **kwargs: object,
+        ) -> None:
+            log_entries.append((level, msg))
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._write_orchestrator_log",
+            _track_log,
+        )
+
+        source1 = tmp_path / "source"
+        source1.mkdir()
+        (source1 / "file.txt").write_text("hello")
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator.COPY_SOURCES",
+            [str(source1)],
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._COPY_SOURCES_BASE",
+            str(tmp_path),
+        )
+
+        def _failing_copytree(src: str, dst: str, **kwargs: object) -> None:
+            raise PermissionError("Simulated copytree failure")
+
+        monkeypatch.setattr(shutil_mod, "copytree", _failing_copytree)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._start_opencode_server",
+            lambda p: None,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._wait_for_server_health",
+            lambda p: None,
+        )
+
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        _execute_pipeline(pipeline_queued)
+
+        pipeline_queued.refresh_from_db()
+        assert pipeline_queued.status == "failed"
+
+        assert len(log_entries) >= 2, (
+            f"Expected at least 2 log entries, "
+            f"got {len(log_entries)}: {log_entries}"
+        )
+
+        last_level, last_msg = log_entries[-1]
+        assert last_msg == "Tearing down workspace", (
+            f"The final log entry must be 'Tearing down workspace', "
+            f"but got '{last_msg}' (level={last_level}). "
+            f"Full log: {log_entries}"
+        )
+
+        criticals = [(lvl, msg) for lvl, msg in log_entries if lvl == "CRITICAL"]
+        assert len(criticals) >= 1
+        crit_idx = next(
+            i for i, (lvl, _) in enumerate(log_entries) if lvl == "CRITICAL"
+        )
+        teardown_idx = next(
+            i for i, (_, msg) in enumerate(log_entries)
+            if msg == "Tearing down workspace"
+        )
+        assert crit_idx < teardown_idx, (
+            f"CRITICAL log (at index {crit_idx}) must appear BEFORE "
+            f"'Tearing down workspace' (at index {teardown_idx}). "
+            f"Full log: {log_entries}"
+        )
+
+    def test_teardown_log_is_final_on_init_stage_failure(
+        self,
+        pipeline_queued: Pipeline,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Same invariant via _run_stage init path: "Tearing down workspace"
+        must be the final log when workspace creation fails during the
+        init stage.
+
+        _run_stage's init handler (orchestrator.py:342-353) has the
+        identical bug — _teardown_workspace is called before the CRITICAL
+        "Failed to create workspace during init stage" log.
+        """
+        import shutil as shutil_mod
+        from apps.orchestrator.orchestrator import advance_pipeline
+
+        log_entries: list[tuple[str, str]] = []
+
+        def _track_log(
+            pipeline: Pipeline, level: str, msg: str, **kwargs: object,
+        ) -> None:
+            log_entries.append((level, msg))
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._write_orchestrator_log",
+            _track_log,
+        )
+
+        # ── Set up pipeline ready for advance_pipeline to dispatch
+        #    to _run_stage for the "init" stage.
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        from apps.orchestrator.models import PipelineStage
+        PipelineStage.objects.create(
+            pipeline=pipeline_queued,
+            name="init",
+            status="pending",
+        )
+
+        source1 = tmp_path / "source"
+        source1.mkdir()
+        (source1 / "file.txt").write_text("hello")
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator.COPY_SOURCES",
+            [str(source1)],
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._COPY_SOURCES_BASE",
+            str(tmp_path),
+        )
+
+        def _failing_copytree(src: str, dst: str, **kwargs: object) -> None:
+            raise PermissionError("Simulated copytree failure")
+
+        monkeypatch.setattr(shutil_mod, "copytree", _failing_copytree)
+
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._start_opencode_server",
+            lambda p: None,
+        )
+        monkeypatch.setattr(
+            "apps.orchestrator.orchestrator._wait_for_server_health",
+            lambda p: None,
+        )
+
+        advance_pipeline(pipeline_queued)
+
+        pipeline_queued.refresh_from_db()
+        assert pipeline_queued.status == "failed"
+
+        assert len(log_entries) >= 2, (
+            f"Expected at least 2 log entries, "
+            f"got {len(log_entries)}: {log_entries}"
+        )
+
+        last_level, last_msg = log_entries[-1]
+        assert last_msg == "Tearing down workspace", (
+            f"The final log entry must be 'Tearing down workspace', "
+            f"but got '{last_msg}' (level={last_level}). "
+            f"Full log: {log_entries}"
+        )
+
+        criticals = [(lvl, msg) for lvl, msg in log_entries if lvl == "CRITICAL"]
+        assert len(criticals) >= 1
+        crit_idx = next(
+            i for i, (lvl, _) in enumerate(log_entries) if lvl == "CRITICAL"
+        )
+        teardown_idx = next(
+            i for i, (_, msg) in enumerate(log_entries)
+            if msg == "Tearing down workspace"
+        )
+        assert crit_idx < teardown_idx, (
+            f"CRITICAL log (at index {crit_idx}) must appear BEFORE "
+            f"'Tearing down workspace' (at index {teardown_idx}). "
+            f"Full log: {log_entries}"
+        )

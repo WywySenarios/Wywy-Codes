@@ -13,6 +13,7 @@ def pipeline_to_dict(pipeline: Pipeline) -> dict:
         "invocation_name": pipeline.invocation_name,
         "status": pipeline.status,
         "current_stage": pipeline.current_stage,
+        "error_message": pipeline.error_message,
         "iteration_count": pipeline.iteration_count,
         "user_input_pending": pipeline.user_input_pending,
         "user_input_request": pipeline.user_input_request,

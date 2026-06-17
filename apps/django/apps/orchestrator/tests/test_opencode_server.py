@@ -8,6 +8,7 @@ a new opencode session and communicates via HTTP.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -388,3 +389,367 @@ class TestOpencodeServerLifecycle:
 
             with pytest.raises(RuntimeError, match="health"):
                 orchestrator._wait_for_server_health(pipeline)
+
+
+# ── RED: async agent communication gap ─────────────────────────────────
+
+class TestAsyncAgentCompletionGap:
+    """Tests that expose the gap between sending a prompt to the agent and
+    waiting for it to write results to state.json.
+
+    ``_run_stage_via_server`` sends a message to the agent and returns
+    immediately without polling state.json for the agent's response.
+    This means ``_validate_stage_state`` always fails on the first attempt
+    because the agent hasn't had time to write ``"completed"``.
+
+    Test 1 (``test_validation_fails_when_agent_not_done``) documents the
+    current behaviour — it *passes* because the bug is present.
+
+    Test 2 (``test_run_stage_via_server_must_poll_until_completed``) defines
+    the required fix — it *fails* because ``_run_stage_via_server`` returns
+    before the (simulated) agent has written to state.json.
+    """
+
+    # ── helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _setup_pipeline_for_stage(
+        db: None,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+        stage_name: str = "RED",
+    ) -> tuple[Pipeline, PipelineStage]:
+        """Create a pipeline, workspace, and state.json with all stages
+        ``"pending"``.  Marks the ``init`` stage as completed so that
+        ``stage_name`` can be advanced to immediately.
+
+        Returns (pipeline, target_stage).
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="async-gap-test",
+            description="Expose async communication gap",
+            status="running",
+        )
+        orchestrator._create_stages(pipeline)
+
+        # Create workspace structure manually — avoids real file-copy.
+        workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
+        state_dir = workspace / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        state = {
+            "pipeline_id": str(pipeline.id),
+            "status": "running",
+            "current_stage": None,
+            "stages": {
+                name: {"status": "pending", "output": None}
+                for name in orchestrator.STAGE_ORDER
+            },
+            "updated_at": "2025-01-01T00:00:00",
+        }
+        (state_dir / "state.json").write_text(json.dumps(state, indent=2))
+
+        # Mark ``init`` as completed so advance_pipeline targets the
+        # requested stage.
+        init_stage = pipeline.stages.get(name="init")
+        init_stage.status = "completed"
+        init_stage.save(update_fields=["status"])
+        pipeline.current_stage = "init"
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        target = pipeline.stages.get(name=stage_name)
+
+        # Mock low-level HTTP calls so ``_run_stage_via_server`` can
+        # execute without a real opencode server container.
+        monkeypatch.setattr(
+            orchestrator, "_get_server_url", lambda p: "http://server:4096",
+        )
+        monkeypatch.setattr(
+            orchestrator, "_stop_opencode_server", lambda p: None,
+        )
+        monkeypatch.setattr(
+            orchestrator, "_create_pr", lambda p: None,
+        )
+        monkeypatch.setattr(
+            orchestrator, "_teardown_workspace", lambda p: None,
+        )
+        monkeypatch.setattr(
+            orchestrator, "_run_formatters", lambda p: None,
+        )
+
+        # Shorten poll timeout so tests don't block for the production
+        # default (600 s) when no agent writes to state.json.
+        monkeypatch.setattr(orchestrator, "STATE_POLL_TIMEOUT", 3)
+
+        return pipeline, target
+
+    # ── Test 1: document the bug (passes now) ───────────────────────────
+
+    def test_validation_fails_when_agent_not_done(
+        self,
+        db,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """When the agent has *not* yet written ``"completed"`` to
+        state.json, ``_validate_stage_state`` returns ``False`` and the
+        stage enters retry mode.
+
+        This test **passes** with the current code — it documents the
+        buggy behaviour that needs to change.
+        """
+        pipeline, stage = self._setup_pipeline_for_stage(
+            db, temp_workspace, temp_log_root, monkeypatch,
+        )
+
+        # Mock HTTP: simulate successful message delivery BUT the agent
+        # does NOT write to state.json (agent is still "thinking").
+        monkeypatch.setattr(
+            orchestrator, "_opencode_post",
+            lambda p, path, **kw: {"id": "session-1"},
+        )
+        monkeypatch.setattr(
+            orchestrator, "_opencode_get",
+            lambda p, path, **kw: {},
+        )
+
+        # Very important: do NOT mock ``_validate_stage_state`` — we want
+        # the real validation to run against the unchanged state.json.
+        # Do NOT mock ``_spawn_agent_container`` either — we want the
+        # real ``_run_stage_via_server`` code path.
+
+        # Act: run the stage
+        orchestrator._run_stage(pipeline, stage)
+
+        # Assert: stage went into retry (not completed!)
+        stage.refresh_from_db()
+        pipeline.refresh_from_db()
+
+        assert stage.status != "completed", (
+            "Stage must NOT be completed — agent hasn't written to state.json"
+        )
+        assert stage.status == "pending", (
+            f"Expected 'pending' (retry), got '{stage.status}'"
+        )
+        assert stage.retry_count == 1, (
+            f"Expected retry_count=1, got {stage.retry_count}"
+        )
+        assert stage.retry_after is not None, (
+            "retry_after must be set for backoff when agent didn't respond"
+        )
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running, got '{pipeline.status}'"
+        )
+
+        # Verify ``_validate_stage_state`` was the reason validation failed
+        # by checking state.json still has 'pending' status.
+        state_path = orchestrator._state_file_path(pipeline)
+        state = json.loads(state_path.read_text())
+        stage_state = state.get("stages", {}).get(stage.name, {})
+        assert stage_state.get("status") == "pending", (
+            f"state.json still has status='{stage_state.get('status')}' "
+            f"(expected 'pending' since agent never wrote)"
+        )
+
+    # ── Test 2: define the fix (FAILS now) ──────────────────────────────
+
+    def test_run_stage_via_server_must_poll_until_completed(
+        self,
+        db,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """``_run_stage_via_server`` must poll state.json until the agent
+        writes ``"completed"`` (or ``"blocked"``), rather than returning
+        immediately after sending the prompt.
+
+        The test simulates an agent that takes ~500 ms to respond:
+        a background thread writes ``"completed"`` to state.json after a
+        short delay.
+
+        **Current behaviour (bug):** ``_run_stage_via_server`` returns
+        before the agent has written to state.json, so validation fails
+        and the stage enters retry mode.
+
+        **Required behaviour (fix):** ``_run_stage_via_server`` loops
+        (polls state.json + sleeps) until the status transitions to
+        ``"completed"``, ``"blocked"``, or a timeout is reached.
+        """
+        pipeline, stage = self._setup_pipeline_for_stage(
+            db, temp_workspace, temp_log_root, monkeypatch,
+        )
+
+        # Mock HTTP calls — simulate a successful session.
+        monkeypatch.setattr(
+            orchestrator, "_opencode_post",
+            lambda p, path, **kw: {"id": "session-1"},
+        )
+        monkeypatch.setattr(
+            orchestrator, "_opencode_get",
+            lambda p, path, **kw: {},
+        )
+
+        # ── Background thread: simulate the agent writing state.json ──
+        state_path = orchestrator._state_file_path(pipeline)
+        agent_done = threading.Event()
+
+        def agent_writes_completed() -> None:
+            """Wait a moment (simulating agent processing), then write
+            ``"completed"`` to state.json for the current stage."""
+            time.sleep(0.3)
+            try:
+                state = json.loads(state_path.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                return
+            state.setdefault("stages", {})[stage.name] = {
+                "status": "completed",
+                "output": {"message": f"{stage.name} completed"},
+            }
+            state["updated_at"] = time.time()
+            tmp = Path(str(state_path) + ".tmp")
+            tmp.write_text(json.dumps(state, indent=2))
+            tmp.rename(state_path)
+            agent_done.set()
+
+        t = threading.Thread(target=agent_writes_completed, daemon=True)
+        t.start()
+
+        # ── Act: run the stage ──────────────────────────────────────────
+        # ``_run_stage`` calls ``_spawn_agent_container`` →
+        # ``_run_stage_via_server``.
+        #
+        # With the fix, ``_run_stage_via_server`` will poll state.json,
+        # discover that the agent wrote ``"completed"``, and return.
+        # ``_validate_stage_state`` then passes and the stage finishes.
+        orchestrator._run_stage(pipeline, stage)
+
+        # Wait for the background thread to finish (so we can inspect
+        # its side effects regardless of test outcome).
+        agent_done.wait(timeout=5)
+
+        stage.refresh_from_db()
+        pipeline.refresh_from_db()
+
+        # ── THIS ASSERTION FAILS WITH THE CURRENT CODE ──────────────────
+        # ``_run_stage_via_server`` doesn't poll — it returns immediately
+        # and the agent hasn't written to state.json yet, so validation
+        # fails and the stage goes into retry.
+        assert stage.status == "completed", (
+            f"_run_stage_via_server must poll state.json until the agent "
+            f"responds.  Expected 'completed', got '{stage.status}'.  "
+            f"retry_count={stage.retry_count}, "
+            f"retry_after={stage.retry_after}"
+        )
+
+        # Sanity check: the agent DID write to state.json (eventually).
+        state = json.loads(state_path.read_text())
+        stage_state = state.get("stages", {}).get(stage.name, {})
+        assert stage_state.get("status") == "completed", (
+            "Agent should have written 'completed' to state.json"
+        )
+
+        assert pipeline.status == "running", (
+            f"Pipeline should still be running, got '{pipeline.status}'"
+        )
+
+    # ── Test 3: downstream effect (FAILS now) ──────────────────────────
+
+    def test_out_of_band_state_write_not_detected_without_polling(
+        self,
+        db,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """Even when the agent writes ``"completed"`` to state.json
+        *between* orchestrator loop ticks, the pipeline fails to make
+        progress because ``_run_stage_via_server`` already returned and
+        the retry guard blocks re-entry.
+
+        This test simulates the following sequence:
+
+        1. ``advance_pipeline`` → ``_run_stage`` → ``_run_stage_via_server``
+           sends prompt, returns immediately.
+        2. ``_validate_stage_state`` fails → ``_handle_stage_failure`` →
+           stage set to ``"pending"`` with ``retry_after``.
+        3. Agent writes ``"completed"`` to state.json (but too late).
+        4. ``advance_pipeline`` called again — retry guard blocks it
+           because ``retry_after > now``.
+
+        **Current behaviour (bug):** The stage never completes even though
+        the agent did its work.
+
+        **Required behaviour (fix):** ``_run_stage_via_server`` polls
+        state.json during step 1, discovers the agent's write (step 3
+        overlaps with step 1), and returns ``"completed"``.
+        """
+        pipeline, stage = self._setup_pipeline_for_stage(
+            db, temp_workspace, temp_log_root, monkeypatch,
+        )
+
+        monkeypatch.setattr(
+            orchestrator, "_opencode_post",
+            lambda p, path, **kw: {"id": "session-1"},
+        )
+        monkeypatch.setattr(
+            orchestrator, "_opencode_get",
+            lambda p, path, **kw: {},
+        )
+
+        state_path = orchestrator._state_file_path(pipeline)
+
+        # ── Step 1: first advance (prompt sent, agent hasn't responded) ─
+        orchestrator.advance_pipeline(pipeline)
+
+        stage.refresh_from_db()
+        pipeline.refresh_from_db()
+
+        # Verify stage entered retry (this is the bug symptom)
+        assert stage.status == "pending", (
+            f"Expected 'pending' (retry) after first advance, "
+            f"got '{stage.status}'"
+        )
+        assert stage.retry_after is not None
+        first_retry_after = stage.retry_after
+
+        # ── Step 2: agent writes 'completed' to state.json ──────────────
+        state = json.loads(state_path.read_text())
+        state["stages"][stage.name] = {
+            "status": "completed",
+            "output": {"message": f"{stage.name} completed"},
+        }
+        state["updated_at"] = time.time()
+        tmp = Path(str(state_path) + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2))
+        tmp.rename(state_path)
+
+        # ── Step 3: second advance (should detect completion) ───────────
+        # With the current code this is blocked by retry_after.
+        # With the fix, _run_stage_via_server would have already polled
+        # and completed the stage in step 1 — this test documents the
+        # downstream consequence of *not* polling.
+        orchestrator.advance_pipeline(pipeline)
+
+        stage.refresh_from_db()
+
+        # ── THIS ASSERTION FAILS WITH THE CURRENT CODE ──────────────────
+        assert stage.status == "completed", (
+            f"Stage should be 'completed' because the agent wrote "
+            f"'completed' to state.json before the second advance.  "
+            f"Got '{stage.status}' instead — retry_after={stage.retry_after} "
+            f"blocks re-entry because _run_stage_via_server didn't poll "
+            f"during the first advance."
+        )
+
+        # Compare retry_after from the first failure — if unchanged the
+        # second advance was indeed a no-op.
+        stage.refresh_from_db()
+        if stage.retry_after == first_retry_after:
+            pytest.fail(
+                "Second advance was a no-op — blocked by retry_after guard. "
+                "The agent wrote 'completed' to state.json between ticks "
+                "but the orchestrator never re-validated."
+            )
