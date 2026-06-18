@@ -160,7 +160,7 @@ class TestResilience:
 
         def spawn_with_abort(pipeline: Pipeline, stage: PipelineStage) -> tuple[int, bool]:
             orchestrator.abort_pipeline(pipeline)
-            return (0, False)  # stage completes
+            raise Exception("Container killed by abort")  # simulate abort killing the container
 
         monkeypatch.setattr(orchestrator, "_spawn_agent_container", spawn_with_abort)
 
@@ -657,4 +657,84 @@ class TestIterativeAdvancement:
         assert pipeline.current_stage == orchestrator.STAGE_ORDER[0], (
             f"current_stage should be '{orchestrator.STAGE_ORDER[0]}', "
             f"got {pipeline.current_stage}"
+        )
+
+
+class TestNoRetryOnDeadPipeline:
+    """_handle_stage_failure must NOT schedule a retry when the pipeline
+    is already in a terminal state (failed/cancelled).
+
+    A race exists: the abort API view runs on a different thread and can
+    set ``pipeline.status = "cancelled"`` while the orchestrator loop is
+    blocked inside ``_run_stage`` waiting for the agent.  When the HTTP
+    call eventually fails, ``_handle_stage_failure`` is called with a
+    *stale* in-memory pipeline object whose status is still ``"running"``.
+    Therefore the guard must **refresh the pipeline from the database**
+    before deciding whether to schedule a retry.
+    """
+
+    def test_no_retry_when_pipeline_already_failed(
+        self,
+        pipeline_failed: Pipeline,
+        db: None,
+    ) -> None:
+        """When a pipeline already has a 'failed' status, _handle_stage_failure
+        must not schedule a retry — it must mark the stage as failed and return
+        without rolling back current_stage."""
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline_failed,
+            name="GREEN",
+            status="running",
+            retry_count=0,
+        )
+
+        orchestrator._handle_stage_failure(pipeline_failed, stage)
+
+        stage.refresh_from_db()
+        pipeline_failed.refresh_from_db()
+
+        # Stage must NOT be pending (which signals a retry)
+        assert stage.status == "failed", (
+            f"Stage should be 'failed', got '{stage.status}' — "
+            f"retry was scheduled despite pipeline being dead"
+        )
+        # No retry_after should be set
+        assert stage.retry_after is None, (
+            f"retry_after must be None, got {stage.retry_after}"
+        )
+        # current_stage must NOT be rolled back
+        assert pipeline_failed.current_stage == "GREEN", (
+            f"current_stage should still be 'GREEN', "
+            f"got '{pipeline_failed.current_stage}'"
+        )
+
+    def test_no_retry_when_pipeline_already_cancelled(
+        self,
+        pipeline_cancelled: Pipeline,
+        db: None,
+    ) -> None:
+        """Same invariant for a 'cancelled' pipeline."""
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline_cancelled,
+            name="init",
+            status="running",
+            retry_count=0,
+        )
+
+        orchestrator._handle_stage_failure(pipeline_cancelled, stage)
+
+        stage.refresh_from_db()
+        pipeline_cancelled.refresh_from_db()
+
+        assert stage.status == "failed", (
+            f"Stage should be 'failed', got '{stage.status}' — "
+            f"retry was scheduled despite pipeline being cancelled"
+        )
+        assert stage.retry_after is None, (
+            f"retry_after must be None, got {stage.retry_after}"
+        )
+        # current_stage should remain unchanged (init → None)
+        assert pipeline_cancelled.current_stage is None, (
+            f"current_stage should be None, "
+            f"got '{pipeline_cancelled.current_stage}'"
         )

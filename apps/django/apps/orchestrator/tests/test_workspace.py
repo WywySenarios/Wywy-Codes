@@ -336,12 +336,12 @@ class TestWorkspaceTeardownOnCopyFailure:
         """When copytree fails, _execute_pipeline must tear down the half-created workspace.
 
         Regression for: removing the inner try/except around shutil.copytree
-        lets OSError propagate to _execute_pipeline/start_pipeline, which
+        lets OSError propagate to _execute_pipeline, which
         marks the pipeline 'failed' but never calls _teardown_workspace.
         The workspace directories and .opencode/opencode.json are orphaned.
         """
         import shutil as shutil_mod
-        from apps.orchestrator.orchestrator import start_pipeline
+        from apps.orchestrator.orchestrator import _execute_pipeline
 
         source1 = tmp_path / "source"
         source1.mkdir()
@@ -361,7 +361,12 @@ class TestWorkspaceTeardownOnCopyFailure:
 
         monkeypatch.setattr(shutil_mod, "copytree", _failing_copytree)
 
-        start_pipeline(pipeline_queued)
+        # _execute_pipeline expects the pipeline to already be marked
+        # "running" — the orchestrator loop does this before calling it.
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        _execute_pipeline(pipeline_queued)
 
         pipeline_queued.refresh_from_db()
         assert pipeline_queued.status == "failed"
@@ -822,7 +827,7 @@ class TestLockedNonSecrets:
 class TestTeardownLogOrder:
     """Teardown logs must always be the final orchestrator log entry for a pipeline."""
 
-    def test_teardown_log_is_final_on_start_pipeline_failure(
+    def test_teardown_log_is_final_on_execute_pipeline_workspace_failure(
         self,
         pipeline_queued: Pipeline,
         temp_workspace: Path,
@@ -830,14 +835,13 @@ class TestTeardownLogOrder:
         monkeypatch: MonkeyPatch,
         tmp_path: Path,
     ) -> None:
-        """When start_pipeline fails during workspace creation, the
+        """When _execute_pipeline fails during workspace creation, the
         "Tearing down workspace" log must be the FINAL orchestrator
         log entry — not followed by a CRITICAL error.
 
-        Current bug: in start_pipeline's except handler (orchestrator.py:206-215)
-        and _execute_pipeline's except handler (orchestrator.py:242-250),
+        Current bug: in _execute_pipeline's except handler (orchestrator.py:251-286),
         _teardown_workspace is called BEFORE _write_orchestrator_log for
-        the "Failed to create workspace" CRITICAL message.
+        the "Pipeline execution failed" CRITICAL message.
 
         This means operators see::
 
@@ -853,7 +857,7 @@ class TestTeardownLogOrder:
         after the workspace has been cleaned up.
         """
         import shutil as shutil_mod
-        from apps.orchestrator.orchestrator import start_pipeline
+        from apps.orchestrator.orchestrator import _execute_pipeline
 
         log_entries: list[tuple[str, str]] = []
 
@@ -899,7 +903,11 @@ class TestTeardownLogOrder:
             lambda p: None,
         )
 
-        start_pipeline(pipeline_queued)
+        # _execute_pipeline expects the pipeline to already be "running".
+        pipeline_queued.status = "running"
+        pipeline_queued.save(update_fields=["status"])
+
+        _execute_pipeline(pipeline_queued)
 
         pipeline_queued.refresh_from_db()
         assert pipeline_queued.status == "failed"
@@ -959,9 +967,9 @@ class TestTeardownLogOrder:
         """Same invariant via _execute_pipeline: "Tearing down workspace"
         must be the final log when workspace creation fails.
 
-        _execute_pipeline (orchestrator.py:242-250) has the identical
-        bug as start_pipeline — _teardown_workspace is called before
-        the CRITICAL "Failed to create workspace" log.
+        _execute_pipeline (orchestrator.py:251-286) has the same
+        ordering issue — _teardown_workspace is called before
+        the CRITICAL "Pipeline execution failed" log.
         """
         import shutil as shutil_mod
         from apps.orchestrator.orchestrator import _execute_pipeline

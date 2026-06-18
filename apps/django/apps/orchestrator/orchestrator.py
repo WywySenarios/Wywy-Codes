@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -98,6 +99,16 @@ STATE_POLL_INTERVAL: float = 2.0
 _wake_event = threading.Event()
 _opencode_server_containers: dict[str, Container] = {}
 
+# Thread-safe signal channel between WSGI thread and orchestrator thread.
+# When a user requests an abort, the WSGI thread puts the pipeline ID here.
+# The orchestrator thread consumes the message and handles state transition
+# and cleanup — the WSGI thread never touches the DB or filesystem for aborts.
+_abort_queue: queue.Queue[str] = queue.Queue()
+
+# Terminal pipeline statuses that must not be revived without explicit opt-in.
+TERMINAL_STATUSES: frozenset[str] = frozenset({"failed", "cancelled", "completed"})
+NON_TERMINAL_STATUSES: frozenset[str] = frozenset({"queued", "running"})
+
 
 def _previous_stage_name(stage_name: str) -> str:
     """Return the name of the stage that precedes the given stage."""
@@ -143,8 +154,16 @@ def orchestrator_loop() -> None:
                         .first()
                     )
                     if next_pipeline:
-                        next_pipeline.status = "running"
-                        next_pipeline.save(update_fields=["status", "updated_at"])
+                        # Check if an abort was requested before it started
+                        if _check_and_consume_abort(str(next_pipeline.id)):
+                            _transition_pipeline_state(next_pipeline, "cancelled")
+                            _write_orchestrator_log(
+                                next_pipeline,
+                                "INFO",
+                                "Pipeline aborted by user before execution",
+                            )
+                            continue  # back to loop, next_pipeline already set=None
+                        _transition_pipeline_state(next_pipeline, "running")
                         pipeline_to_start = next_pipeline
 
             if pipeline_to_advance:
@@ -191,61 +210,13 @@ def _reap_orphaned_pipelines() -> None:
         return
     logger.warning("Reaping %d orphaned pipeline(s) from previous run", count)
     for pipeline in orphaned:
-        pipeline.status = "failed"
-        pipeline.save(update_fields=["status", "updated_at"])
+        _transition_pipeline_state(pipeline, "failed")
         pipeline.stages.filter(status="running").update(status="failed")
         _write_orchestrator_log(
             pipeline,
             "ERROR",
             "Pipeline orphaned by orchestrator restart — reset to failed",
         )
-
-
-def start_pipeline(pipeline: Pipeline) -> None:
-    """Initialize a queued pipeline: create workspace, stages, and launch first stage."""
-    logger.info(
-        "Starting pipeline %s (%s)",
-        pipeline.id,
-        pipeline.invocation_name,
-    )
-
-    try:
-        _create_workspace(pipeline)
-        _start_opencode_server(pipeline)
-        _wait_for_server_health(pipeline)
-    except Exception as exc:
-        pipeline.status = "failed"
-        pipeline.save(update_fields=["status", "updated_at"])
-        _write_orchestrator_log(
-            pipeline,
-            "CRITICAL",
-            f"Failed to create workspace: {exc}",
-        )
-        _teardown_workspace(pipeline)
-        return
-
-    pipeline.status = "running"
-    pipeline.save(update_fields=["status", "updated_at"])
-
-    try:
-        _create_stages(pipeline)
-    except Exception as exc:
-        pipeline.status = "failed"
-        pipeline.save(update_fields=["status", "updated_at"])
-        _write_orchestrator_log(
-            pipeline,
-            "CRITICAL",
-            f"Pipeline execution failed: {exc}",
-        )
-        _teardown_workspace(pipeline)
-        return
-
-    _write_orchestrator_log(
-        pipeline,
-        "INFO",
-        f"Pipeline started: {pipeline.invocation_name}",
-    )
-    advance_pipeline(pipeline)
 
 
 def _execute_pipeline(pipeline: Pipeline) -> None:
@@ -268,8 +239,7 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
         _wait_for_server_health(pipeline)
         _create_stages(pipeline)
     except Exception as exc:
-        pipeline.status = "failed"
-        pipeline.save(update_fields=["status", "updated_at"])
+        _transition_pipeline_state(pipeline, "failed")
         _write_orchestrator_log(
             pipeline,
             "CRITICAL",
@@ -423,7 +393,7 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
 
     # The init stage is responsible for pipeline setup (workspace, server).
     # Only run setup if the workspace has not already been created (e.g. by
-    # start_pipeline / _execute_pipeline).
+    # _execute_pipeline).
     if stage.name == "init" and not _state_file_path(pipeline).exists():
         try:
             _create_workspace(pipeline)
@@ -432,8 +402,7 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
         except Exception as exc:
             stage.status = "failed"
             stage.save(update_fields=["status"])
-            pipeline.status = "failed"
-            pipeline.save(update_fields=["status", "updated_at"])
+            _transition_pipeline_state(pipeline, "failed")
             _write_orchestrator_log(
                 pipeline,
                 "CRITICAL",
@@ -499,16 +468,95 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
         _handle_stage_failure(pipeline, stage)
 
 
+def _check_and_consume_abort(pipeline_id: str) -> bool:
+    """Check whether *pipeline_id* has a pending abort message.
+
+    Drains the queue but preserves messages for other pipelines.
+    Thread-safe — ``queue.Queue`` is designed for cross-thread use.
+
+    Returns ``True`` if an abort message was found and consumed.
+    """
+    found = False
+    others: list[str] = []
+    while not _abort_queue.empty():
+        try:
+            pid = _abort_queue.get_nowait()
+            if pid == pipeline_id:
+                found = True
+            else:
+                others.append(pid)
+        except queue.Empty:
+            break
+    for pid in others:
+        _abort_queue.put(pid)
+    return found
+
+
+def _transition_pipeline_state(
+    pipeline: Pipeline,
+    target_status: str,
+    *,
+    revive: bool = False,
+) -> None:
+    """Edit the pipeline status in the database.
+
+    Only the orchestrator thread should call this.  Refreshes the pipeline
+    from the database to detect cross-thread status changes, then refuses
+    to transition a terminal pipeline to a non-terminal status unless
+    ``revive=True`` is explicitly passed.
+
+    Raises:
+        RuntimeError: If the transition would revive a terminal pipeline
+                      without ``revive=True``.
+    """
+    pipeline.refresh_from_db(fields=["status"])
+    if (
+        pipeline.status in TERMINAL_STATUSES
+        and target_status in NON_TERMINAL_STATUSES
+        and not revive
+    ):
+        raise RuntimeError(
+            f"Cannot revive pipeline {pipeline.id}: "
+            f"current status={pipeline.status}, "
+            f"target={target_status}"
+        )
+    pipeline.status = target_status
+    pipeline.save(update_fields=["status", "updated_at"])
+
+
 def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
     """Handle a failed stage with retry logic (non-blocking)."""
     stage.retry_count += 1
 
-    if stage.retry_count > PIPELINE_MAX_RETRIES:
+    # ── Guard 1: pending abort message from WSGI thread ─────────────────
+    # If a concurrent WSGI abort was requested, the abort message sits
+    # in the queue.  Abort is an orchestrator-level decision that
+    # supersedes any per-stage retry logic.
+    if _check_and_consume_abort(str(pipeline.id)):
         stage.status = "failed"
-        pipeline.status = "failed"
         with transaction.atomic():
             stage.save(update_fields=["status", "retry_count"])
-            pipeline.save(update_fields=["status", "updated_at"])
+        _transition_pipeline_state(pipeline, "cancelled")
+        _write_orchestrator_log(pipeline, "INFO", "Pipeline aborted by user")
+        _teardown_workspace(pipeline)
+        return
+
+    # ── Guard 2: pipeline already dead in the database ─────────────────
+    # Handles the cross-thread race where a concurrent WSGI thread has
+    # already set pipeline.status to a terminal value (e.g. "cancelled"
+    # from abort_pipeline in the old design, or a direct DB write).
+    pipeline.refresh_from_db(fields=["status"])
+    if pipeline.status in TERMINAL_STATUSES:
+        stage.status = "failed"
+        with transaction.atomic():
+            stage.save(update_fields=["status", "retry_count"])
+        return
+
+    if stage.retry_count > PIPELINE_MAX_RETRIES:
+        stage.status = "failed"
+        with transaction.atomic():
+            stage.save(update_fields=["status", "retry_count"])
+        _transition_pipeline_state(pipeline, "failed")
         _write_orchestrator_log(
             pipeline,
             "ERROR",
@@ -538,8 +586,7 @@ def _handle_stage_failure(pipeline: Pipeline, stage: PipelineStage) -> None:
 
 def _complete_pipeline(pipeline: Pipeline) -> None:
     """Mark a pipeline as completed and attempt PR creation."""
-    pipeline.status = "completed"
-    pipeline.save(update_fields=["status", "updated_at"])
+    _transition_pipeline_state(pipeline, "completed")
     _write_orchestrator_log(pipeline, "INFO", "Pipeline completed")
     try:
         _create_pr(pipeline)
@@ -1125,11 +1172,19 @@ def write_user_input_response(pipeline: Pipeline, response: str) -> None:
 
 
 def abort_pipeline(pipeline: Pipeline) -> None:
-    """Abort a pipeline, setting it to cancelled status."""
-    pipeline.status = "cancelled"
-    pipeline.save(update_fields=["status", "updated_at"])
-    _write_orchestrator_log(pipeline, "INFO", "Pipeline aborted by user")
-    _teardown_workspace(pipeline)
+    """Request cancellation of a pipeline.
+
+    Sends an abort signal to the orchestrator thread via a thread-safe
+    queue, stops the agent container to unblock any in-flight HTTP call,
+    and wakes the orchestrator loop.
+
+    The orchestrator thread owns all DB and filesystem state mutations:
+    it will consume the queue message, transition the pipeline status to
+    ``"cancelled"`` via ``_transition_pipeline_state``, and tear down the
+    workspace.
+    """
+    _abort_queue.put(str(pipeline.id))
+    _stop_opencode_server(pipeline)
     wake_orchestrator()
 
 
