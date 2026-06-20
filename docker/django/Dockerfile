@@ -65,4 +65,7 @@ RUN git config --global user.email "wywy@localhost" && \
     git config --global init.defaultBranch master
 
 EXPOSE 8000
-CMD ["sh", "-c", "umask 002 && python manage.py check_db_writable && python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 2"]
+# --preload must NOT be used: OrchestratorConfig.ready() uses fcntl.flock()
+# to elect a single orchestrator worker, and --preload would run ready() in
+# the master process before fork, causing all children to inherit the lock.
+CMD ["sh", "-c", "umask 002 && python manage.py check_db_writable && python manage.py migrate && exec gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers ${WEB_CONCURRENCY:-2} --threads 2"]

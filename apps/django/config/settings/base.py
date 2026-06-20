@@ -143,6 +143,7 @@ PIPELINE_MAX_ITERATIONS: int = int(environ.get("PIPELINE_MAX_ITERATIONS", "5"))
 PIPELINE_RETRY_BACKOFF_SECONDS: list[int] = [
     int(x) for x in environ.get("PIPELINE_RETRY_BACKOFF_SECONDS", "30,60,120").split(",")
 ]
+WEB_CONCURRENCY: int = int(environ.get("WEB_CONCURRENCY", "2"))
 GITHUB_TOKEN_FILE: str = environ.get("GITHUB_TOKEN_FILE", "/run/secrets/github-pat")
 WORKSPACE_ROOT: str = environ.get("WORKSPACE_ROOT", "/var/workspace/Wywy-Website")
 CONTROL_REPO_PATH: str = environ.get("CONTROL_REPO_PATH", "/etc/Wywy-Website-Control")
