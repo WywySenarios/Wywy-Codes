@@ -2,6 +2,32 @@
 
 **Service name:** `agentic`
 
+## Critical property: atomicity and thread-safety
+
+**EVERY** code path that reads or writes pipeline/stage state runs
+concurrently across **N** Gunicorn worker processes (``--workers ${WEB_CONCURRENCY:-2}``,
+see ``Dockerfile`` CMD).  Each worker has its own orchestrator daemon
+thread and its own WSGI request handlers.  There is **no** inter-process
+coordination beyond the database row lock (``select_for_update``) and a
+per-process ``Queue`` for abort signals.
+
+This means:
+
+- Two orchestrator threads can call ``advance_pipeline()`` on the same
+  pipeline within milliseconds of each other.
+- A WSGI request handler (``api_respond``, ``api_abort``) can mutate
+  pipeline state while an orchestrator thread in another worker is
+  simultaneously advancing stages.
+- The ``_teardown_completed`` set is **per-process**, so two workers
+  can both attempt to tear down the same workspace.
+- Any change that is not safe under concurrent execution will corrupt
+  pipeline state or silently destroy another worker's data.
+
+**Before adding any state mutation**, ask: *"What happens if two workers
+do this at the same time?"*  If the answer is not "nothing bad", the
+change must use ``select_for_update``, ``transaction.atomic()``, or
+some other synchronisation primitive.
+
 ## Configuration
 
 ### Environment files
