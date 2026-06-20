@@ -200,27 +200,76 @@ def api_abort(request: HttpRequest, pipeline_id: str) -> HttpResponse:
     return JsonResponse({"status": "ok"})
 
 
-def api_log_tail(request: HttpRequest, pipeline_id: str, stage_name: str) -> HttpResponse:
-    """Tail logs for a specific pipeline stage. Returns JSON array of log entries."""
+def _parse_log_entries(content: str, max_lines: int) -> list[dict]:
+    """Parse log entries from *content*, returning the last *max_lines* entries.
+
+    Supports two formats:
+    1. A single JSON array or object (pretty-printed stage logs).
+    2. JSON Lines (one JSON object per line, e.g. orchestrator logs).
+
+    Entries that cannot be parsed are silently skipped.
+    """
+    stripped = content.strip()
+
+    # Try whole-file JSON parsing first — handles pretty-printed JSON arrays
+    # that stage logs are written as (json.dumps(messages, indent=2)).
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, list):
+            return parsed[-max_lines:]
+        elif isinstance(parsed, dict):
+            return [parsed]
+    except json.JSONDecodeError:
+        pass
+
+    # Fall back to JSON Lines (one JSON object per line).
+    entries: list[dict] = []
+    for line in stripped.split("\n"):
+        if line.strip():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return entries[-max_lines:]
+
+
+def api_log_files(request: HttpRequest, pipeline_id: str) -> HttpResponse:
+    """List available log files for a pipeline."""
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     _ = get_object_or_404(Pipeline, pk=pipeline_id)
-    try:
-        lines_param = int(request.GET.get("lines", "100"))
-    except (ValueError, TypeError):
-        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+    log_dir = Path(settings.LOG_ROOT) / str(pipeline_id)
+    files: list[str] = []
+    if log_dir.exists():
+        for f in sorted(log_dir.iterdir()):
+            if f.is_file() and f.name.endswith(".log") and not f.name.startswith("."):
+                files.append(f.name)
+    return JsonResponse({"logs": files})
+
+
+def api_log_entries(request: HttpRequest, pipeline_id: str, log_filename: str) -> HttpResponse:
+    """Return JSON entries from a single log file, or raw text with ?raw."""
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    _ = get_object_or_404(Pipeline, pk=pipeline_id)
     log_dir = Path(settings.LOG_ROOT) / str(pipeline_id)
 
-    entries: list[dict] = []
-    for log_file_name in (f"{stage_name}.log", "orchestrator.log"):
-        log_file = log_dir / log_file_name
-        if log_file.exists():
-            content = log_file.read_text()
-            for line in content.strip().split("\n"):
-                if line.strip():
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-    entries = entries[-lines_param:]
-    return JsonResponse({"entries": entries})
+    log_file = (log_dir / log_filename).resolve()
+
+    if "raw" in request.GET:
+        if not log_file.exists():
+            return JsonResponse({"error": "File not found"}, status=404)
+        content = log_file.read_text()
+        return HttpResponse(content, content_type="text/plain; charset=utf-8")
+
+    # JSON entries mode
+    if not log_file.exists():
+        return JsonResponse({"entries": []})
+
+    try:
+        max_lines = int(request.GET.get("lines", "100"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+
+    content = log_file.read_text()
+    return JsonResponse({"entries": _parse_log_entries(content, max_lines)})
