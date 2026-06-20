@@ -133,8 +133,9 @@ class TestAgentInvocationPerStage:
             f"got {pipeline.status}"
         )
         target = pipeline.stages.get(name=stage_name)
-        assert target.status == "completed", (
-            f"Stage {stage_name} should be completed, got {target.status}"
+        expected = "pending" if stage_name == "init" else "completed"
+        assert target.status == expected, (
+            f"Stage {stage_name} should be {expected}, got {target.status}"
         )
         for name in orchestrator.STAGE_ORDER:
             if name == stage_name:

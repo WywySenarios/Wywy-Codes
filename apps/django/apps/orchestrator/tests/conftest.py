@@ -13,7 +13,6 @@ from django.conf import settings
 from django.test import override_settings
 
 from apps.orchestrator.models import Pipeline, PipelineStage
-from apps.orchestrator.orchestrator import _abort_queue
 
 
 @pytest.fixture
@@ -189,21 +188,3 @@ def patched_copy_sources(source_trees: dict[str, str], monkeypatch: MonkeyPatch)
     )
     return source_trees
 
-
-@pytest.fixture(autouse=True)
-def _clear_abort_queue() -> Generator:
-    """Clear the abort queue before each test to prevent cross-test leakage."""
-
-    # Drain the queue before the test
-    while not _abort_queue.empty():
-        try:
-            _abort_queue.get_nowait()
-        except Exception:
-            break
-    yield
-    # Drain again after the test
-    while not _abort_queue.empty():
-        try:
-            _abort_queue.get_nowait()
-        except Exception:
-            break

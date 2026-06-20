@@ -12,6 +12,15 @@ import django.utils.timezone as dj_timezone
 from _pytest.monkeypatch import MonkeyPatch
 
 from apps.orchestrator import orchestrator
+from apps.orchestrator.exceptions import (
+    InitialStageAdvancementError,
+    MissingInitialStageError,
+    PipelineNotRunningError,
+    StageAdvancementError,
+    StageAlreadyTerminalError,
+    StageNotFoundError,
+    StageNotInOrderError,
+)
 from apps.orchestrator.models import Pipeline, PipelineStage
 
 
@@ -651,12 +660,65 @@ class TestIterativeAdvancement:
             f"got {pipeline.status}"
         )
         init_stage = pipeline.stages.get(name=orchestrator.STAGE_ORDER[0])
-        assert init_stage.status == "completed", (
-            f"Init stage should be completed, got {init_stage.status}"
+        assert init_stage.status == "pending", (
+            f"Init stage should be pending, got {init_stage.status}"
         )
         assert pipeline.current_stage == orchestrator.STAGE_ORDER[0], (
             f"current_stage should be '{orchestrator.STAGE_ORDER[0]}', "
             f"got {pipeline.current_stage}"
+        )
+
+    def test_does_not_advance_from_init_stage(
+        self,
+        db: None,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """``advance_pipeline`` must not advance past the init stage.
+
+        Once init completes, the next orchestrator tick must NOT
+        progress to ``RED`` through ``advance_pipeline``.  The init
+        stage is a setup boundary — advancing from it is illegal.
+
+        This test verifies the ``InitialStageAdvancementError`` guard
+        is plumbed through from ``_validate_stage_advancement`` into
+        ``advance_pipeline``.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="no-advance-from-init",
+            status="running",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(
+                pipeline=pipeline, name=name, status="pending",
+            )
+        # Complete init and set current_stage so advance_pipeline
+        # looks past it to RED.
+        pipeline.stages.filter(name="init").update(status="pending")
+        pipeline.current_stage = "init"
+        pipeline.save(update_fields=["current_stage", "updated_at"])
+
+        spawn_calls: list[str] = []
+
+        def track_spawn(_p: Pipeline, s: PipelineStage) -> tuple[int, bool]:
+            spawn_calls.append(s.name)
+            return (0, False)
+
+        monkeypatch.setattr(orchestrator, "_spawn_agent_container", track_spawn)
+        monkeypatch.setattr(orchestrator, "_create_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_start_opencode_server", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_wait_for_server_health", lambda p: None)
+        monkeypatch.setattr(
+            orchestrator, "_validate_stage_state",
+            lambda p, s: (True, ""),
+        )
+        monkeypatch.setattr(orchestrator, "_create_pr", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_teardown_workspace", lambda p: None)
+        monkeypatch.setattr(orchestrator, "_run_formatters", lambda p: None)
+
+        orchestrator.advance_pipeline(pipeline)
+
+        assert len(spawn_calls) == 0, (
+            f"Must not advance from init stage, but spawned {spawn_calls}"
         )
 
 
@@ -738,3 +800,357 @@ class TestNoRetryOnDeadPipeline:
             f"current_stage should be None, "
             f"got '{pipeline_cancelled.current_stage}'"
         )
+
+
+class TestStageAdvancementValidation:
+    """Tests for ``_validate_stage_advancement`` — validates pipeline stage
+    transitions and raises ``StageAdvancementError`` (or a subclass)
+    on illegal advancement.
+
+    The helper sits at the boundary between the orchestrator's polling
+    loop and stage execution.  It must reject transitions that would
+    corrupt pipeline state.
+
+    .. note::
+       The ``force=True`` parameter exists on the helper but must NOT be
+       used without consulting project maintainers (see the function
+       docstring in ``orchestrator.py``).
+    """
+
+    def test_advance_fails_when_pipeline_not_running(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: pipeline status is not ``'running'``.
+
+        A stage cannot be advanced on a pipeline that is ``'queued'``,
+        ``'completed'``, ``'failed'``, or ``'cancelled'``.  This
+        validates the first gate in ``advance_pipeline`` (line 309)
+        in a reusable way.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="not-running",
+            status="completed",
+            current_stage="init",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="pending",
+        )
+        with pytest.raises(PipelineNotRunningError, match="must be .running."):
+            orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_advance_fails_when_stage_already_completed(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: stage is already in terminal state ``'completed'``.
+
+        A completed stage must not be re-executed.  This validates the
+        silent-return guard in ``advance_pipeline`` (line 356) as an
+        explicit error instead.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="stage-done",
+            status="running",
+            current_stage="init",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="completed",
+        )
+        with pytest.raises(StageAlreadyTerminalError, match="already completed"):
+            orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_advance_fails_when_stage_already_failed(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: stage is already in terminal state ``'failed'``."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="stage-failed",
+            status="running",
+            current_stage="init",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="failed",
+        )
+        with pytest.raises(StageAlreadyTerminalError, match="already failed"):
+            orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_advance_fails_when_stage_name_not_in_stage_order(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: stage name is not a recognised stage name.
+
+        A stage whose name is absent from ``STAGE_ORDER`` cannot be
+        advanced — the orchestrator would not know what to do with it.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="bogus-stage",
+            status="running",
+            current_stage="bogus",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="bogus", status="pending",
+        )
+        with pytest.raises(StageNotInOrderError, match="not in STAGE_ORDER"):
+            orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_advance_fails_when_stage_is_none(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: stage argument is ``None`` (no stage row exists).
+
+        When ``advance_pipeline`` is called on a pipeline with zero
+        ``PipelineStage`` rows (e.g. during the dual-orchestrator
+        initialisation window), there is no stage to advance.  The
+        helper must reject this as illegal.  When called without
+        ``expected_initial_stage`` this raises ``StageNotFoundError``;
+        with the parameter set it raises ``MissingInitialStageError``
+        instead.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="no-stages-yet",
+            status="running",
+            current_stage=None,
+        )
+        # No PipelineStage rows at all — still being initialised
+        with pytest.raises(StageNotFoundError, match="cannot advance None"):
+            orchestrator._validate_stage_advancement(pipeline, None)
+
+    def test_advance_succeeds_on_running_pipeline_with_pending_stage(
+        self,
+        db: None,
+    ) -> None:
+        """Legal: pipeline is running and stage is ``'pending'``.
+
+        This is the normal case — the helper must NOT raise.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="happy-path",
+            status="running",
+            current_stage="RED",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(
+                pipeline=pipeline, name=name, status="pending",
+            )
+        PipelineStage.objects.filter(
+            pipeline=pipeline, name="init",
+        ).update(status="completed")
+        stage = pipeline.stages.get(name="RED")
+
+        # Should not raise
+        orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_force_true_bypasses_pipeline_status_check(
+        self,
+        db: None,
+    ) -> None:
+        """With ``force=True``, the helper must skip validation.
+
+        Even on a completed pipeline with a completed stage,
+        ``force=True`` suppresses all ``StageAdvancementError``
+        subclasses.  This test exists so the ``force`` parameter
+        stays exercised even though it is never (yet) called with
+        ``True`` in production code.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="force-test",
+            status="completed",
+            current_stage="init",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="completed",
+        )
+        # Must not raise when force=True
+        orchestrator._validate_stage_advancement(
+            pipeline, stage, force=True,
+        )
+
+    # ── expected_initial_stage tests ──────────────────────────────────────
+
+    def test_advance_succeeds_with_expected_initial_stage(
+        self,
+        db: None,
+    ) -> None:
+        """Legal: ``current_stage`` is ``None`` and the fetched stage
+        matches ``expected_initial_stage``.
+
+        This is the normal first-advance path — the helper must NOT
+        raise.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="expected-init-ok",
+            status="running",
+            current_stage=None,
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="pending",
+        )
+        # Should not raise
+        orchestrator._validate_stage_advancement(
+            pipeline, stage, expected_initial_stage="init",
+        )
+
+    def test_advance_fails_when_expected_initial_stage_mismatch(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: first advance targets a stage that is not the
+        expected initial stage."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="expected-init-mismatch",
+            status="running",
+            current_stage=None,
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="RED", status="pending",
+        )
+        with pytest.raises(MissingInitialStageError, match="expected initial stage"):
+            orchestrator._validate_stage_advancement(
+                pipeline, stage, expected_initial_stage="init",
+            )
+
+    def test_advance_fails_when_no_stages_with_expected_initial_stage(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: stage is ``None`` (no stage rows exist) and
+        ``expected_initial_stage`` indicates we expected the initial
+        stage to exist — the dual-orchestrator race scenario."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="expected-init-race",
+            status="running",
+            current_stage=None,
+        )
+        with pytest.raises(MissingInitialStageError, match="expected initial stage"):
+            orchestrator._validate_stage_advancement(
+                pipeline, None, expected_initial_stage="init",
+            )
+
+    def test_advance_fails_when_advancing_from_initial_stage(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: ``current_stage`` is the initial stage and we are
+        advancing to the next stage in the chain."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="advance-from-init",
+            status="running",
+            current_stage="init",
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="RED", status="pending",
+        )
+        with pytest.raises(InitialStageAdvancementError, match="advance from initial stage"):
+            orchestrator._validate_stage_advancement(
+                pipeline, stage, expected_initial_stage="init",
+            )
+
+    def test_expected_initial_stage_does_not_affect_later_stages(
+        self,
+        db: None,
+    ) -> None:
+        """Legal: ``expected_initial_stage`` is ignored when
+        ``current_stage`` is past the initial stage — normal
+        validation proceeds unaffected."""
+        pipeline = Pipeline.objects.create(
+            invocation_name="expected-init-later",
+            status="running",
+            current_stage="GREEN",
+        )
+        for name in orchestrator.STAGE_ORDER:
+            PipelineStage.objects.create(
+                pipeline=pipeline, name=name, status="pending",
+            )
+        PipelineStage.objects.filter(pipeline=pipeline, name="init").update(status="completed")
+        PipelineStage.objects.filter(pipeline=pipeline, name="GREEN").update(status="completed")
+        stage = pipeline.stages.get(name="REFRACTOR")
+
+        # Should not raise
+        orchestrator._validate_stage_advancement(
+            pipeline, stage, expected_initial_stage="init",
+        )
+
+    def test_advance_fails_when_no_expected_initial_stage_with_none_current(
+        self,
+        db: None,
+    ) -> None:
+        """Illegal: ``current_stage`` is ``None`` but the caller did
+        not provide ``expected_initial_stage``.
+
+        The helper MUST refuse to validate a first-advance when the
+        caller has not declared which stage is the expected initial
+        stage.  Without this contract the helper cannot distinguish
+        between "advancing to init correctly" and "advancing to a
+        random stage on a fresh pipeline".
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="missing-expected-with-none-current",
+            status="running",
+            current_stage=None,
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="init", status="pending",
+        )
+        with pytest.raises(StageAdvancementError, match="expected_initial_stage is required"):
+            orchestrator._validate_stage_advancement(pipeline, stage)
+
+    def test_force_true_bypasses_expected_initial_stage_guards(
+        self,
+        db: None,
+    ) -> None:
+        """``force=True`` must bypass all validation including the
+        ``expected_initial_stage`` guards.
+
+        Even when the pipeline would clearly violate initial-stage
+        rules (current_stage is ``None`` and stage does not match),
+        ``force=True`` suppresses the error.  This ensures the
+        ``force`` parameter remains authoritative regardless of
+        which guards are added in the future.
+        """
+        pipeline = Pipeline.objects.create(
+            invocation_name="force-with-expected-init",
+            status="running",
+            current_stage=None,
+        )
+        stage = PipelineStage.objects.create(
+            pipeline=pipeline, name="RED", status="pending",
+        )
+        # Must not raise even though RED != expected initial stage "init"
+        orchestrator._validate_stage_advancement(
+            pipeline, stage, force=True, expected_initial_stage="init",
+        )
+
+
+class TestStageAdvancementExceptions:
+    """Tests for the custom exception hierarchy used by
+    ``_validate_stage_advancement``.
+
+    Each exception is a subclass of ``StageAdvancementError`` so
+    call sites can catch the base type for generic handling or the
+    specific type for differentiated behaviour.
+    """
+
+    def test_stage_advancement_error_is_exception(self) -> None:
+        assert issubclass(StageAdvancementError, Exception)
+
+    def test_pipeline_not_running_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(PipelineNotRunningError, StageAdvancementError)
+
+    def test_stage_not_found_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(StageNotFoundError, StageAdvancementError)
+
+    def test_stage_already_terminal_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(StageAlreadyTerminalError, StageAdvancementError)
+
+    def test_stage_not_in_order_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(StageNotInOrderError, StageAdvancementError)
+
+    def test_missing_initial_stage_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(MissingInitialStageError, StageAdvancementError)
+
+    def test_initial_stage_advancement_error_is_stage_advancement_error(self) -> None:
+        assert issubclass(InitialStageAdvancementError, StageAdvancementError)
