@@ -1,9 +1,13 @@
 import { useState, useEffect } from "react";
 import { StatusBadge, StageProgress } from "./stage-progress";
-import { LogViewer } from "./log-viewer";
 import { Button } from "../ui/button";
+import { LogTabs } from "./log-tabs";
 import { getPipeline, abortPipeline, type Pipeline, type PipelineStage } from "../../lib/api";
 import { getPipelineIdFromURL, pipelineRespondUrl, pipelineFilesUrl } from "../../lib/routes";
+
+function logFilesFromStages(stages: PipelineStage[]): string[] {
+  return ["orchestrator.log", "server.log", ...stages.map((s) => `${s.name}.log`)];
+}
 
 export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
   const [pipeline, setPipeline] = useState<(Pipeline & { stages?: PipelineStage[] }) | null>(null);
@@ -30,7 +34,6 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
   }
 
   const stages = pipeline?.stages || [];
-  const currentStage = pipeline?.current_stage || "orchestrator";
 
   if (loading) {
     return (
@@ -134,10 +137,11 @@ export function PipelineDetail({ pipelineId }: { pipelineId?: string }) {
       </div>
 
       <div>
-        <h2 className="text-lg font-semibold mb-3">
-          Log — <span className="text-muted-foreground">{currentStage}</span>
-        </h2>
-        <LogViewer pipelineId={pipeline.id} stage={currentStage} />
+        <h2 className="text-lg font-semibold mb-3">Logs</h2>
+        <LogTabs
+          pipelineId={pipeline.id}
+          logFiles={stages.length > 0 ? logFilesFromStages(stages) : []}
+        />
       </div>
 
       {pipeline.pr_url && (

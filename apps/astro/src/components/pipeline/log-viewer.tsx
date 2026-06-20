@@ -3,6 +3,7 @@ import { tailLog, type LogEntry } from "../../lib/api";
 
 export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: string }) {
   const [entries, setEntries] = useState<LogEntry[]>([]);
+  const [raw, setRaw] = useState(false);
   const [follow, setFollow] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -46,12 +47,38 @@ export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: st
 
   return (
     <div className="relative">
+      {/* Raw toggle button */}
+      <div className="absolute top-2 right-2 z-10 flex gap-1">
+        <button
+          onClick={() => setRaw(!raw)}
+          className={`text-xs px-2 py-1 rounded transition-colors ${
+            raw
+              ? "bg-blue-600 text-white"
+              : "bg-muted text-muted-foreground hover:bg-muted/80"
+          }`}
+        >
+          {raw ? "Parsed" : "Raw"}
+        </button>
+      </div>
+
       <div
         ref={containerRef}
         onScroll={handleScroll}
         className="bg-card border border-border p-4 h-80 overflow-y-auto font-mono text-xs"
       >
-        {entries.length === 0 ? (
+        {raw ? (
+          <pre className="whitespace-pre-wrap text-foreground">
+            {entries.length > 0 ? (
+              <>
+                Raw content:
+                {"\n"}
+                {JSON.stringify(entries, null, 2)}
+              </>
+            ) : (
+              "No log entries yet."
+            )}
+          </pre>
+        ) : entries.length === 0 ? (
           <p className="text-muted-foreground">No log entries yet.</p>
         ) : (
           entries.map((entry, i) => (
@@ -63,7 +90,7 @@ export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: st
           ))
         )}
       </div>
-      {!follow && entries.length > 0 && (
+      {!follow && !raw && entries.length > 0 && (
         <button
           onClick={() => { scrollToBottom(); setFollow(true); }}
           className="absolute bottom-4 right-6 bg-blue-600 hover:bg-blue-700 text-foreground text-xs px-3 py-1.5 rounded-full shadow-lg transition-colors"

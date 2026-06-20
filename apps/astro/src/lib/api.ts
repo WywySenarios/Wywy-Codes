@@ -93,10 +93,33 @@ export async function abortPipeline(id: string) {
   return res.json();
 }
 
-export async function tailLog(pipelineId: string, stage: string): Promise<LogEntry[]> {
-  const res = await fetch(`${API_URL}/api/pipelines/${pipelineId}/logs/${stage}/`);
+export async function tailLog(pipelineId: string, filename: string): Promise<LogEntry[]> {
+  const url = `${API_URL}/api/pipelines/${pipelineId}/logs/entries/${encodeURIComponent(filename)}/`;
+  const res = await fetch(url);
   const data = await res.json();
   return data.entries || [];
+}
+
+/** List available log filenames for a pipeline. Calls GET /api/pipelines/{id}/logs/. */
+export async function listLogFiles(pipelineId: string): Promise<string[]> {
+  const res = await fetch(`${API_URL}/api/pipelines/${pipelineId}/logs/`);
+  const data = await res.json();
+  return data.logs || [];
+}
+
+/** Fetch parsed JSON entries from a single log file. Calls GET /api/pipelines/{id}/logs/entries/{filename}/. */
+export async function tailLogFile(pipelineId: string, filename: string, lines?: number): Promise<LogEntry[]> {
+  let url = `${API_URL}/api/pipelines/${pipelineId}/logs/entries/${encodeURIComponent(filename)}/`;
+  if (lines !== undefined) url += `?lines=${lines}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.entries || [];
+}
+
+/** Fetch a log file's raw text content. Calls GET /api/pipelines/{id}/logs/entries/{filename}/?raw. */
+export async function getLogFileRaw(pipelineId: string, filename: string): Promise<string> {
+  const res = await fetch(`${API_URL}/api/pipelines/${pipelineId}/logs/entries/${encodeURIComponent(filename)}/?raw`);
+  return res.text();
 }
 
 export async function listFiles(pipelineId: string, verbose = false): Promise<FileListing> {
