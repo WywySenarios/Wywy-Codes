@@ -17,6 +17,7 @@ import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from django.conf import settings
 from django.test import override_settings
+from django.utils import timezone as dj_timezone
 
 from apps.orchestrator import orchestrator
 from apps.orchestrator.models import Pipeline, PipelineStage
@@ -60,6 +61,42 @@ class MockContainers:
 
 
 # ── RED: _run_stage must use HTTP, not Docker spawns ───────────────────────
+
+
+def _mock_http(monkeypatch: MonkeyPatch) -> None:
+    """Replace HTTP helpers so _run_stage reaches the polling loop."""
+    monkeypatch.setattr(
+        orchestrator, "_opencode_post",
+        lambda p, path, **kw: {"id": "session-1"},
+    )
+    monkeypatch.setattr(
+        orchestrator, "_opencode_get",
+        lambda p, path, **kw: {},
+    )
+    monkeypatch.setattr(
+        orchestrator, "_get_server_url",
+        lambda p: "http://server:4096",
+    )
+
+
+def _write_stage_state(
+    pipeline: Pipeline,
+    stage_name: str,
+    status: str,
+    output: dict | None = None,
+) -> None:
+    """Write a stage status to state.json the same way the agent would."""
+    state_path = orchestrator._state_file_path(pipeline)
+    state = json.loads(state_path.read_text())
+    entry: dict[str, Any] = {"status": status}
+    if output is not None:
+        entry["output"] = output
+    state["stages"][stage_name] = entry
+    state["updated_at"] = time.time()
+    tmp_path = Path(str(state_path) + ".tmp")
+    tmp_path.write_text(json.dumps(state, indent=2))
+    tmp_path.rename(state_path)
+
 
 class TestRunStageUsesServerNotDocker:
     """When advance_pipeline runs through all 9 stages, _spawn_agent_container
@@ -182,8 +219,6 @@ class TestRunStageUsesServerNotDocker:
             return {}
 
         def mock_check(pipeline, stage):
-            pipeline.user_input_request = {"question": "Which approach?"}
-            pipeline.save(update_fields=["user_input_request"])
             return True
 
         monkeypatch.setattr(orchestrator, "_opencode_post", mock_post)
@@ -244,6 +279,135 @@ class TestRunStageUsesServerNotDocker:
         assert len(fail_calls) == 1, (
             f"Expected _handle_stage_failure after HTTP error, "
             f"got {len(fail_calls)} calls"
+        )
+
+
+    def test_agent_failed_status_triggers_retry_not_completed(
+        self,
+        db,
+        patched_copy_sources: dict[str, str],
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """When the agent writes ``status: "failed"`` directly to state.json,
+        ``_run_stage`` must NOT mark the stage as ``"completed"`` — it must
+        enter retry via ``_handle_stage_failure`` instead.
+
+        The polling loop in ``_run_stage_via_server`` treats ``"failed"`` as a
+        terminal status alongside ``"completed"`` and ``"blocked"``.  But
+        ``_validate_stage_state`` also accepts ``"failed"`` as valid.  When
+        validation passes, ``_run_stage`` unconditionally sets
+        ``stage.status = "completed"`` — the agent's explicit failure signal
+        is silently discarded.
+
+        **Current behaviour (bug):** ``stage.status`` becomes ``"completed"``
+        even though the agent reported ``"failed"``.
+
+        **Required behaviour (fix):** ``_run_stage_via_server`` must return a
+        non-zero exit code for ``"failed"`` so that ``_run_stage`` routes to
+        ``_handle_stage_failure``.
+        """
+        assert orchestrator.STAGE_ORDER == EXPECTED_STAGE_ORDER
+        pipeline = Pipeline.objects.create(
+            invocation_name="agent-failed-status",
+            description="test agent writing failed to state.json",
+            status="running",
+            current_stage=None,
+        )
+        orchestrator._create_workspace(pipeline)
+        orchestrator._create_stages(pipeline)
+
+        stage = pipeline.stages.get(name="RED")
+
+        # ── Simulate agent writing "failed" to state.json ───────────────
+        _write_stage_state(
+            pipeline,
+            stage.name,
+            "failed",
+            output={"error": "Agent encountered an error"},
+        )
+
+        # Mock HTTP — must succeed so we reach the polling loop
+        _mock_http(monkeypatch)
+
+        # Do NOT monkeypatch _handle_stage_failure — the production code
+        # must route to it naturally.
+
+        orchestrator._run_stage(pipeline, stage)
+
+        stage.refresh_from_db()
+        pipeline.refresh_from_db()
+
+        # ── THIS ASSERTION FAILS WITH THE CURRENT CODE ──────────────────
+        # The stage is marked "completed" even though the agent reported
+        # "failed".  Fix _run_stage_via_server to return exit_code=1 when
+        # the agent writes "failed", so _handle_stage_failure is invoked.
+        assert stage.status != "completed", (
+            f"Stage must NOT be 'completed' when agent wrote 'failed'. "
+            f"Got: '{stage.status}'"
+        )
+        assert stage.status in ("pending", "failed"), (
+            f"Expected 'pending' (retry) or 'failed', got '{stage.status}'"
+        )
+        assert stage.retry_count >= 1, (
+            f"Expected retry_count >= 1 when agent reported failure, "
+            f"got {stage.retry_count}"
+        )
+
+    def test_stale_failed_status_reset_in_state_json_on_retry(
+        self,
+        db,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """After a stage fails (agent wrote ``"failed"`` to state.json) and
+        enters retry, the orchestrator must reset the stage's status in
+        state.json so that a subsequent retry does not immediately re-detect
+        the stale ``"failed"`` status.
+
+        **Current behaviour (bug):** ``_run_stage_via_server`` reads the stale
+        ``"failed"`` from state.json on the first poll of every retry attempt,
+        returning ``exit_code=1`` before the agent has any chance to write
+        new output.  Each retry is wasted — the agent never gets to run.
+
+        **Required behaviour (fix):** When ``_run_stage`` starts a retry
+        (``retry_count > 0``), it must update state.json to reflect the new
+        attempt by resetting the stage status (e.g., to ``"running"``).
+        """
+        pipeline, stage = TestAsyncAgentCompletionGap._setup_pipeline_for_stage(
+            db, temp_workspace, temp_log_root, monkeypatch,
+        )
+
+        _mock_http(monkeypatch)
+
+        # ── Simulate agent writing "failed" to state.json ─────────────────
+        _write_stage_state(pipeline, stage.name, "failed")
+
+        # ── First run: agent-reported failure → retry ────────────────────
+        orchestrator._run_stage(pipeline, stage)
+        stage.refresh_from_db()
+        assert stage.retry_count == 1, (
+            f"Expected retry after first attempt, "
+            f"got retry_count={stage.retry_count}"
+        )
+        assert stage.status in ("pending", "failed")
+
+        # ── Second run (retry): state.json should not have stale "failed" ─
+        orchestrator._run_stage(pipeline, stage)
+
+        # ── THIS ASSERTION FAILS WITH THE CURRENT CODE ───────────────────
+        # State.json still has "failed" from the first run.  The fix must
+        # reset it so the poll loop doesn't immediately re-detect it.
+        state_path = orchestrator._state_file_path(pipeline)
+        state = json.loads(state_path.read_text())
+        stage_state = state.get("stages", {}).get(stage.name, {})
+        assert stage_state.get("status") != "failed", (
+            f"Stage status in state.json must NOT be 'failed' after a retry "
+            f"starts.  Got: '{stage_state.get('status')}'.  The orchestrator "
+            f"must reset the status (e.g. to 'running') so that a fresh poll "
+            f"does not immediately re-detect the stale failure."
         )
 
 

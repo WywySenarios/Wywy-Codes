@@ -11,6 +11,8 @@ import json
 import re
 from pathlib import Path
 
+import docker
+from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.http import (
     HttpRequest,
@@ -21,8 +23,9 @@ from django.http import (
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 
-from apps.orchestrator.models import Pipeline
-from apps.orchestrator.orchestrator import abort_pipeline, wake_orchestrator, write_user_input_response
+from apps.orchestrator.agent_client import AgentClient, AgentClientError, part_to_log_entry
+from apps.orchestrator.models import Pipeline, PipelineStage
+from apps.orchestrator.orchestrator import abort_pipeline, wake_orchestrator
 from apps.orchestrator.serializers import pipeline_to_dict, stage_to_dict
 
 
@@ -144,9 +147,43 @@ def _list_pipeline_files(workspace: Path, verbose: bool) -> dict[str, list[dict[
     return files
 
 
+def _build_agent_client(pipeline: Pipeline) -> AgentClient:
+    """Construct an ``AgentClient`` connected to the pipeline's container.
+
+    Resolves the container's IP address on the agent network via the
+    Docker SDK and returns a client configured with the server password.
+
+    When *pipeline* has no ``container_id`` (e.g. in test or transitional
+    state), falls back to the configured hostname — enough for the
+    ``AgentClient`` to be constructed; in production the container must
+    exist for message delivery to succeed.
+    """
+    if pipeline.container_id:
+        dkr = docker.from_env()
+        container = dkr.containers.get(pipeline.container_id)
+        ip = container.attrs["NetworkSettings"]["Networks"][
+            settings.AGENT_NETWORK
+        ]["IPAddress"]
+        base_url = f"http://{ip}:{settings.OPENCODE_SERVER_PORT}"
+    else:
+        base_url = (
+            f"http://{settings.OPENCODE_SERVER_HOSTNAME}:"
+            f"{settings.OPENCODE_SERVER_PORT}"
+        )
+    return AgentClient(
+        base_url=base_url,
+        password=settings.OPENCODE_SERVER_PASSWORD,
+    )
+
+
 @csrf_exempt
 def api_respond(request: HttpRequest, pipeline_id: str) -> HttpResponse:
-    """Provide user guidance to a blocked pipeline."""
+    """Provide user guidance to a blocked pipeline.
+
+    Looks up the blocked stage on the pipeline, sends the user's response
+    as a follow-up message to the opencode session, clears the pending
+    flag, and signals the orchestrator to resume.
+    """
     if request.method != "POST":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     pipeline = get_object_or_404(Pipeline, pk=pipeline_id)
@@ -168,20 +205,32 @@ def api_respond(request: HttpRequest, pipeline_id: str) -> HttpResponse:
     if selected_option:
         response_text = f"[Selected option: {selected_option}] {freeform_response}"
 
-    user_input_count = len(
-        [
-            f
-            for f in (Path(settings.WORKSPACE_ROOT) / str(pipeline_id) / "context" / "user-input").glob(
-                "response_*.md"
-            )
-            if f.is_file()
-        ]
-    )
-    response_dir = Path(settings.WORKSPACE_ROOT) / str(pipeline_id) / "context" / "user-input"
-    response_dir.mkdir(parents=True, exist_ok=True)
-    (response_dir / f"response_{user_input_count + 1}.md").write_text(response_text)
+    # ── Find the blocked stage with a session_id ────────────────────────
+    blocked_stage = pipeline.stages.filter(status="blocked").first()
+    if blocked_stage is None or not blocked_stage.session_id:
+        return JsonResponse(
+            {"error": "Blocked stage has no session — cannot deliver response"},
+            status=400,
+        )
 
-    write_user_input_response(pipeline, response_text)
+    # ── Send the user's response to the opencode session ────────────────
+    agent = _build_agent_client(pipeline)
+    try:
+        async_to_sync(agent.send_message)(
+            blocked_stage.session_id,
+            parts=[{"type": "text", "text": response_text}],
+        )
+    except AgentClientError:
+        return JsonResponse(
+            {"error": "Failed to deliver response to agent session"},
+            status=502,
+        )
+
+    # ── Clear pending flag and wake orchestrator ────────────────────────
+    pipeline.user_input_pending = False
+    pipeline.save(update_fields=["user_input_pending", "updated_at"])
+
+    wake_orchestrator()
     return JsonResponse({"status": "ok"})
 
 
@@ -273,3 +322,69 @@ def api_log_entries(request: HttpRequest, pipeline_id: str, log_filename: str) -
 
     content = log_file.read_text()
     return JsonResponse({"entries": _parse_log_entries(content, max_lines)})
+
+
+# ── Stage-aware structured logs ──────────────────────────────────────── #
+
+
+@csrf_exempt
+def api_stage_logs(request: HttpRequest, pipeline_id: str, stage_name: str) -> HttpResponse:
+    """Return structured log entries for a specific pipeline stage.
+
+    When the stage has a ``session_id``, fetches typed message parts from
+    the opencode server via ``AgentClient.get_session_messages()`` and
+    transforms them into log entries with ``type`` and ``content`` fields.
+
+    Otherwise, falls back to reading ``{stage_name}.log`` from the
+    filesystem.
+
+    Always merges with ``orchestrator.log`` entries, sorted by timestamp.
+    Supports ``?lines=N`` filtering (default 100).
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    pipeline = get_object_or_404(Pipeline, pk=pipeline_id)
+    stage = pipeline.stages.filter(name=stage_name).first()
+    if stage is None:
+        return JsonResponse({"error": "Stage not found"}, status=404)
+
+    try:
+        max_lines = int(request.GET.get("lines", "100"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+
+    log_dir = Path(settings.LOG_ROOT) / str(pipeline_id)
+    entries: list[dict] = []
+
+    # ── 1. Source — session messages or file-based stage log ──────────
+    if stage.session_id:
+        agent = _build_agent_client(pipeline)
+        try:
+            messages = async_to_sync(agent.get_session_messages)(stage.session_id)
+        except AgentClientError:
+            messages = []
+        for msg in messages:
+            for part in msg.parts:
+                entries.append(part_to_log_entry(part))
+    else:
+        stage_log_path = log_dir / f"{stage_name}.log"
+        if log_dir.exists() and stage_log_path.exists():
+            content = stage_log_path.read_text()
+            entries.extend(_parse_log_entries(content, max_lines))
+
+    # ── 2. Merge orchestrator.log entries ─────────────────────────────
+    orch_log_path = log_dir / "orchestrator.log"
+    if log_dir.exists() and orch_log_path.exists():
+        content = orch_log_path.read_text()
+        for entry in _parse_log_entries(content, max_lines):
+            entry.setdefault("type", "orchestrator")
+            entries.append(entry)
+
+    # ── 3. Sort by timestamp (empty ts sorts first) ───────────────────
+    entries.sort(key=lambda e: e.get("ts", ""))
+
+    # ── 4. Apply lines limit ──────────────────────────────────────────
+    entries = entries[-max_lines:]
+
+    return JsonResponse({"entries": entries})

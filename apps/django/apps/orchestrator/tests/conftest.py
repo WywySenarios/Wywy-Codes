@@ -56,8 +56,61 @@ def pipeline_awaiting_input(db) -> Pipeline:
         status="running",
         current_stage="GREEN",
         user_input_pending=True,
-        user_input_request={"question": "What color?", "options": ["red", "blue"]},
     )
+
+
+@pytest.fixture
+def pipeline_blocked_with_session(db) -> Pipeline:
+    """A pipeline blocked on GREEN with a ``session_id`` on the blocked stage."""
+    pipeline = Pipeline.objects.create(
+        invocation_name="blocked-with-session",
+        description="Pipeline blocked with session_id",
+        status="running",
+        current_stage="GREEN",
+        user_input_pending=True,
+    )
+    stage_names = [
+        "init",
+        "RED",
+        "GREEN",
+        "REFRACTOR",
+        "compilance",
+        "PR writer",
+    ]
+    for name in stage_names:
+        PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
+    PipelineStage.objects.filter(pipeline=pipeline, name="init").update(status="completed")
+    PipelineStage.objects.filter(pipeline=pipeline, name="RED").update(status="completed")
+    PipelineStage.objects.filter(pipeline=pipeline, name="GREEN").update(
+        status="blocked", session_id="sess_123"
+    )
+    return pipeline
+
+
+@pytest.fixture
+def pipeline_blocked_wo_session(db) -> Pipeline:
+    """A pipeline blocked on GREEN with **no** ``session_id`` on the blocked stage."""
+    pipeline = Pipeline.objects.create(
+        invocation_name="blocked-wo-session",
+        description="Pipeline blocked without session_id",
+        status="running",
+        current_stage="GREEN",
+        user_input_pending=True,
+    )
+    stage_names = [
+        "init",
+        "RED",
+        "GREEN",
+        "REFRACTOR",
+        "compilance",
+        "PR writer",
+    ]
+    for name in stage_names:
+        PipelineStage.objects.create(pipeline=pipeline, name=name, status="pending")
+    PipelineStage.objects.filter(pipeline=pipeline, name="init").update(status="completed")
+    PipelineStage.objects.filter(pipeline=pipeline, name="RED").update(status="completed")
+    PipelineStage.objects.filter(pipeline=pipeline, name="GREEN").update(status="blocked")
+    return pipeline
 
 
 @pytest.fixture

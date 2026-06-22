@@ -154,3 +154,13 @@ OPENCODE_SERVER_PASSWORD: str = environ.get("OPENCODE_SERVER_PASSWORD", "")
 OPENCODE_SERVER_USERNAME: str = environ.get("OPENCODE_SERVER_USERNAME", "opencode")
 OPENCODE_SERVER_HEALTH_RETRIES: int = int(environ.get("OPENCODE_SERVER_HEALTH_RETRIES", "30"))
 OPENCODE_SERVER_HEALTH_INTERVAL: float = float(environ.get("OPENCODE_SERVER_HEALTH_INTERVAL", "2.0"))
+OPENCODE_DEFAULT_MODEL: str = environ.get("OPENCODE_DEFAULT_MODEL", "anthropic/claude-sonnet-4-5")
+OPENCODE_SMALL_MODEL: str = environ.get("OPENCODE_SMALL_MODEL", "anthropic/claude-haiku-4-5")
+STAGE_MODEL_MAP: dict[str, dict[str, str]] = {
+    "init":       {"model": OPENCODE_DEFAULT_MODEL},
+    "RED":        {"model": "deepseek/deepseek-chat"},
+    "GREEN":      {"model": "deepseek/deepseek-chat"},
+    "REFRACTOR":  {"model": "anthropic/claude-sonnet-4-5"},
+    "compilance": {"model": "anthropic/claude-haiku-4-5"},
+    "PR writer":  {"model": "anthropic/claude-sonnet-4-5"},
+}

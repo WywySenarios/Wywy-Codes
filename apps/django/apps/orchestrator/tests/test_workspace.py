@@ -694,7 +694,9 @@ class TestOpenCodeConfig:
         config_path = workspace / ".opencode" / "opencode.json"
         assert config_path.exists()
         config = json.loads(config_path.read_text())
-        assert "webfetch" in config["permissions"]["deny"]
+        assert config.get("permission") == "allow", (
+            f"Expected permission='allow', got '{config.get('permission')}'"
+        )
 
 
 class TestCopytreeErrorPropagation:

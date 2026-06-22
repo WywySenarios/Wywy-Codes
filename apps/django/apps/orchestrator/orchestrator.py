@@ -718,6 +718,15 @@ def _run_stage(pipeline: Pipeline, stage: PipelineStage) -> None:
     stage.retry_after = None
     stage.save(update_fields=["status", "started_at", "retry_after"])
 
+    # On retry, reset the stage entry in state.json so that the polling
+    # loop in _run_stage_via_server does not immediately re-read a stale
+    # terminal status (e.g. "failed") left by the previous attempt.
+    # The agent will overwrite this with "completed"/"blocked" when it
+    # finishes.  First-run stages keep whatever status is in state.json
+    # (typically "pending" from _init_state_file).
+    if stage.retry_count > 0:
+        _write_stage_field(pipeline, stage.name, "status", "running")
+
     _write_orchestrator_log(
         pipeline,
         "INFO",
@@ -1001,7 +1010,9 @@ def _create_workspace(pipeline: Pipeline) -> None:
     log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    _write_opencode_config(workspace)
+    from apps.orchestrator.config_writer import write_pipeline_config
+
+    write_pipeline_config(workspace, pipeline)
 
     for source in COPY_SOURCES:
         rel_path = os.path.relpath(source, _COPY_SOURCES_BASE)
@@ -1036,19 +1047,6 @@ def _create_workspace(pipeline: Pipeline) -> None:
             )
 
     _init_state_file(pipeline)
-
-
-def _write_opencode_config(workspace: Path) -> None:
-    """Write .opencode/opencode.json disabling webfetch for the agent container."""
-    config_dir = workspace / ".opencode"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config = {
-        "permissions": {
-            "deny": ["webfetch"],
-        },
-    }
-    config_path = config_dir / "opencode.json"
-    config_path.write_text(json.dumps(config, indent=2))
 
 
 def _init_state_file(pipeline: Pipeline) -> None:
@@ -1109,6 +1107,30 @@ def _write_state_field(state_path: Path, key: str, value: object) -> None:
     tmp.rename(state_path)
 
 
+def _write_stage_field(
+    pipeline: Pipeline, stage_name: str, key: str, value: object,
+) -> None:
+    """Atomically set a field in a stage entry inside ``state.json``.
+
+    ``_write_state_field`` writes at the top level (``state[key]``); this
+    helper writes into the nested ``state["stages"][stage_name][key]``.
+    Used to mirror the orchestrator's view of stage state into the shared
+    file so that ``_run_stage_via_server``'s polling loop sees the correct
+    status rather than a stale value left by a previous run.
+    """
+    state_path = _state_file_path(pipeline)
+    try:
+        state = json.loads(state_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    stages = state.setdefault("stages", {})
+    stages.setdefault(stage_name, {})[key] = value
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tmp = Path(str(state_path) + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.rename(state_path)
+
+
 def _read_state_field(pipeline: Pipeline, key: str) -> object:
     """Read a single field from state.json."""
     state_path = _state_file_path(pipeline)
@@ -1161,10 +1183,6 @@ def _check_blocked_state(pipeline: Pipeline, stage: PipelineStage) -> bool:
         stage_state = state.get(stage.name)
         if isinstance(stage_state, dict):
             if stage_state.get("status") == "blocked":
-                output = stage_state.get("output")
-                if isinstance(output, dict):
-                    pipeline.user_input_request = output
-                    pipeline.save(update_fields=["user_input_request"])
                 return True
     return False
 
@@ -1338,6 +1356,7 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
     state_path = _state_file_path(pipeline)
     poll_deadline = time.time() + STATE_POLL_TIMEOUT
     is_blocked = False
+    exit_code = 0
     while time.time() < poll_deadline:
         try:
             state = json.loads(state_path.read_text())
@@ -1348,6 +1367,9 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
         status = stage_state.get("status")
         if status in ("completed", "blocked", "failed"):
             is_blocked = status == "blocked"
+            if is_blocked:
+                _set_blocked_input(pipeline, stage_state)
+            exit_code = 1 if status == "failed" else 0
             break
         if _check_blocked_state(pipeline, stage):
             is_blocked = True
@@ -1361,7 +1383,7 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
     except Exception:
         logger.warning("Failed to capture session messages for stage %s", stage.name)
 
-    return 0, is_blocked
+    return exit_code, is_blocked
 
 
 def _run_formatters(pipeline: Pipeline) -> None:
@@ -1491,14 +1513,6 @@ def _build_subprocess_env(extra: dict[str, str]) -> dict[str, str]:
     env.update(extra)
     return env
 
-
-def write_user_input_response(pipeline: Pipeline, response: str) -> None:
-    """Record user input response and restart the blocked stage."""
-    pipeline.user_input_pending = False
-    pipeline.user_input_response = response
-    pipeline.save(update_fields=["user_input_pending", "user_input_response", "updated_at"])
-    _write_orchestrator_log(pipeline, "INFO", "User input received, resuming pipeline")
-    wake_orchestrator()
 
 
 def abort_pipeline(pipeline: Pipeline) -> None:

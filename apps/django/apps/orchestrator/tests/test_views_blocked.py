@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 from apps.orchestrator.models import Pipeline
 
 
@@ -30,17 +28,5 @@ class TestListBlockedPipelines:
         assert names == {"p2", "p3"}
 
     def test_rejects_non_get_methods(self, client, db):
-        response = client.post(self.URL, data=json.dumps({}), content_type="application/json")
+        response = client.post(self.URL, data="{}", content_type="application/json")
         assert response.status_code == 405
-
-    def test_blocked_pipeline_has_user_input_request(self, client, db):
-        Pipeline.objects.create(
-            invocation_name="blocked",
-            status="running",
-            user_input_pending=True,
-            user_input_request={"question": "what?"},
-        )
-        response = client.get(self.URL)
-        pipeline = response.json()["pipelines"][0]
-        assert pipeline["user_input_pending"] is True
-        assert pipeline["user_input_request"] == {"question": "what?"}

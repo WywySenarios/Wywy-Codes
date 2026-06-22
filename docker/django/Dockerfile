@@ -35,7 +35,9 @@ RUN pip install --no-cache-dir \
     pyyaml \
     whitenoise>=6.0 \
     pytest \
-    pytest-django
+    pytest-django \
+    pytest-asyncio \
+    httpx>=0.27
 
 ARG CONTAINER_GID=2523
 ARG CONTAINER_UID=25233

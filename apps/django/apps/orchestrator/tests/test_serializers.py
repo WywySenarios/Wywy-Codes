@@ -18,9 +18,9 @@ class TestPipelineToDict:
 
         expected_keys = {
             "id", "invocation_name", "status", "current_stage",
-            "error_message", "iteration_count", "user_input_pending",
-            "user_input_request", "pr_url", "description",
-            "created_at", "updated_at",
+            "error_message", "container_id", "iteration_count",
+            "user_input_pending", "pr_url",
+            "description", "created_at", "updated_at",
         }
         assert set(data.keys()) == expected_keys
 
@@ -42,19 +42,6 @@ class TestPipelineToDict:
         data = pipeline_to_dict(pipeline)
         assert data["pr_url"] == ""
 
-    def test_null_user_input_request_preserved(self, db):
-        pipeline = Pipeline.objects.create(invocation_name="test", user_input_request=None)
-        data = pipeline_to_dict(pipeline)
-        assert data["user_input_request"] is None
-
-    def test_user_input_request_with_data(self, db):
-        pipeline = Pipeline.objects.create(
-            invocation_name="test",
-            user_input_request={"question": "what?", "options": ["a", "b"]},
-        )
-        data = pipeline_to_dict(pipeline)
-        assert data["user_input_request"] == {"question": "what?", "options": ["a", "b"]}
-
     def test_invocation_name_preserved(self, db):
         pipeline = Pipeline.objects.create(invocation_name="my-feature")
         data = pipeline_to_dict(pipeline)
@@ -70,6 +57,23 @@ class TestPipelineToDict:
         data = pipeline_to_dict(pipeline)
         assert data["status"] == "running"
 
+    # ── RED: container_id must be serialized ───────────────────────────
+
+    def test_container_id_in_pipeline_dict(self, db):
+        """``pipeline_to_dict`` must include ``container_id`` so the
+        frontend can track which opencode server container belongs to
+        this pipeline."""
+        pipeline = Pipeline.objects.create(invocation_name="test")
+        data = pipeline_to_dict(pipeline)
+        # This assertion FAILS — container_id is not in the serializer yet.
+        assert "container_id" in data, (
+            f"pipeline_to_dict must include 'container_id'. "
+            f"Got keys: {list(data.keys())}"
+        )
+        assert data["container_id"] is None, (
+            "Default container_id should be None"
+        )
+
 
 class TestStageToDict:
     def test_all_fields_present(self, db):
@@ -77,7 +81,11 @@ class TestStageToDict:
         stage = PipelineStage.objects.create(pipeline=pipeline, name="planner")
         data = stage_to_dict(stage)
 
-        expected_keys = {"id", "name", "status", "output", "retry_count", "started_at", "finished_at"}
+        expected_keys = {
+            "id", "name", "status", "output", "retry_count",
+            "session_id", "forked_from_session_id",
+            "started_at", "finished_at",
+        }
         assert set(data.keys()) == expected_keys
 
     def test_name_preserved(self, db):
@@ -110,3 +118,35 @@ class TestStageToDict:
         stage = PipelineStage.objects.create(pipeline=pipeline, name="planner", retry_count=3)
         data = stage_to_dict(stage)
         assert data["retry_count"] == 3
+
+    # ── RED: session fields must be serialized ─────────────────────────
+
+    def test_session_id_in_stage_dict(self, db):
+        """``stage_to_dict`` must include ``session_id`` so the frontend
+        can reference the opencode server session for this stage."""
+        pipeline = Pipeline.objects.create(invocation_name="test")
+        stage = PipelineStage.objects.create(pipeline=pipeline, name="planner")
+        data = stage_to_dict(stage)
+        # This assertion FAILS — session_id is not in the serializer yet.
+        assert "session_id" in data, (
+            f"stage_to_dict must include 'session_id'. "
+            f"Got keys: {list(data.keys())}"
+        )
+        assert data["session_id"] is None, (
+            "Default session_id should be None"
+        )
+
+    def test_forked_from_session_id_in_stage_dict(self, db):
+        """``stage_to_dict`` must include ``forked_from_session_id`` so
+        the frontend can track retry fork origin."""
+        pipeline = Pipeline.objects.create(invocation_name="test")
+        stage = PipelineStage.objects.create(pipeline=pipeline, name="planner")
+        data = stage_to_dict(stage)
+        # This assertion FAILS — forked_from_session_id is not in the serializer yet.
+        assert "forked_from_session_id" in data, (
+            f"stage_to_dict must include 'forked_from_session_id'. "
+            f"Got keys: {list(data.keys())}"
+        )
+        assert data["forked_from_session_id"] is None, (
+            "Default forked_from_session_id should be None"
+        )
