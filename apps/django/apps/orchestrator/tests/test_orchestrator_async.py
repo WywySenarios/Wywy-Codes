@@ -15,7 +15,7 @@ import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from django.conf import settings
 
-from apps.orchestrator.agent_client import AgentClient
+from opencode_ai import AsyncOpencode
 from apps.orchestrator.models import Pipeline, PipelineStage
 
 
@@ -108,7 +108,7 @@ async def test_run_pipeline_starts_container(
 
     mock_cm = MagicMock()
     mock_cm.start_container = MagicMock(return_value="ctn-abc")
-    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AgentClient))
+    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AsyncOpencode))
     mock_cm.stop_container = MagicMock()
 
     monkeypatch.setattr(
@@ -158,7 +158,7 @@ async def test_run_pipeline_calls_execute_stage_for_each_stage(
 
     mock_cm = MagicMock()
     mock_cm.start_container = MagicMock(return_value="ctn-abc")
-    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AgentClient))
+    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AsyncOpencode))
     mock_cm.stop_container = MagicMock()
 
     monkeypatch.setattr(
@@ -202,7 +202,7 @@ async def test_run_pipeline_stops_container_on_completion(
 
     mock_cm = MagicMock()
     mock_cm.start_container = MagicMock(return_value="ctn-abc")
-    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AgentClient))
+    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AsyncOpencode))
     mock_cm.stop_container = MagicMock()
 
     monkeypatch.setattr(
@@ -267,7 +267,7 @@ async def test_semaphore_limits_concurrent_pipelines(
 
     mock_cm = MagicMock()
     mock_cm.start_container = MagicMock(return_value="ctn-abc")
-    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AgentClient))
+    mock_cm.wait_healthy = AsyncMock(return_value=MagicMock(spec=AsyncOpencode))
     mock_cm.stop_container = MagicMock()
 
     monkeypatch.setattr(

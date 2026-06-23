@@ -1,14 +1,12 @@
 """Session-based stage executor for the opencode server pipeline.
 
-Replaces the old ``_run_stage`` polling-loop approach with an HTTP-driven
-flow that creates a session, sends a stage prompt via the opencode server
-API, and inspects the ``MessageResponse`` parts to determine completion,
+Creates a session, sends a stage prompt via the opencode server API,
+retrieves the full response parts, and inspects them for completion,
 blocked, or failure outcomes.
 
 DB persistence is the caller's responsibility — this module updates
-in-memory attributes only.  See the async orchestrator (Cycle 6) for
-``sync_to_async`` wrappers around ``pipeline.save()`` and
-``stage.save()``.
+in-memory attributes only.  The orchestrator synchronises these to
+the database with ``sync_to_async`` wrappers.
 """
 
 from __future__ import annotations
@@ -17,17 +15,36 @@ import enum
 import logging
 from typing import Any
 
+from django.conf import settings
 from django.utils import timezone as dj_timezone
 
-from apps.orchestrator.agent_client import (
-    AgentClient,
-    AgentClientError,
-    is_blocked,
-    has_error,
-)
+from opencode_ai import APIStatusError, AsyncOpencode
+from opencode_ai.types import AssistantMessage, Part, ToolPart
+
 from apps.orchestrator.models import Pipeline, PipelineStage
 
 logger = logging.getLogger(__name__)
+
+
+# ── Part inspection helpers ──────────────────────────────────────────
+
+
+def is_blocked(parts: list[Part]) -> bool:
+    """Return ``True`` when the response indicates the stage is blocked.
+
+    Returns ``True`` when any part is a ``ToolPart`` with
+    ``state.status == "pending"``.
+    """
+    return any(
+        isinstance(p, ToolPart)
+        and getattr(p.state, "status", None) == "pending"
+        for p in parts
+    )
+
+
+def has_error(message: AssistantMessage) -> bool:
+    """Return ``True`` when the ``AssistantMessage`` has a non-``None`` error."""
+    return message.error is not None
 
 
 class StageResult(enum.Enum):
@@ -62,12 +79,28 @@ def build_stage_prompt(
     return parts
 
 
+def _resolve_provider(model_id: str) -> str:
+    """Resolve a provider ID from a model identifier.
+
+    Returns the part before the first ``/`` (e.g. ``"deepseek/deepseek-chat"``
+    → ``"deepseek"``).
+    """
+    return model_id.split("/")[0]
+
+
 async def execute_stage(
     pipeline: Pipeline,
     stage: PipelineStage,
-    client: AgentClient,
+    client: AsyncOpencode,
 ) -> StageResult:
     """Execute a single pipeline stage via the opencode HTTP server.
+
+    Two-step flow:
+    1. Create a session (``client.session.create()``).
+    2. Send the prompt (``client.session.chat()``).
+    3. Inspect ``session.chat`` response for errors.
+    4. Retrieve full parts via ``client.session.messages()``.
+    5. Inspect parts for blocked / completion markers.
 
     Updates *stage* and *pipeline* in-memory attributes (``status``,
     ``session_id``, ``started_at``, ``finished_at``,
@@ -81,7 +114,7 @@ async def execute_stage(
     stage:
         The stage within *pipeline* to execute.
     client:
-        An ``AgentClient`` connected to the pipeline's opencode server.
+        An ``AsyncOpencode`` connected to the pipeline's opencode server.
 
     Returns
     -------
@@ -97,44 +130,58 @@ async def execute_stage(
 
     # ── Create session ─────────────────────────────────────────────────
     try:
-        session_id = await client.create_session(title=stage.name)
-    except AgentClientError as exc:
-        logger.error("Failed to create session for stage %s: %s", stage.name, exc)
+        session = await client.session.create()
+    except APIStatusError as exc:
+        logger.error(
+            "Failed to create session for stage %s: %s", stage.name, exc
+        )
         stage.status = "failed"
         stage.finished_at = dj_timezone.now()
         return StageResult.FAILED
 
     # ── Save session ID (in-memory; caller persists) ───────────────────
-    stage.session_id = session_id
+    stage.session_id = session.id
 
     # ── Build and send prompt ──────────────────────────────────────────
     prompt_parts = build_stage_prompt(pipeline, stage)
 
+    model_id = settings.STAGE_MODEL_MAP.get(stage.name, {}).get(
+        "model", settings.OPENCODE_DEFAULT_MODEL
+    )
+    provider_id = _resolve_provider(model_id)
+
     try:
-        response = await client.send_message(
-            session_id,
+        response = await client.session.chat(
+            session.id,
+            model_id=model_id,
+            provider_id=provider_id,
             parts=prompt_parts,
         )
-    except AgentClientError as exc:
+    except APIStatusError as exc:
         logger.error(
             "Failed to send message for stage %s (session %s): %s",
-            stage.name, session_id, exc,
+            stage.name, session.id, exc,
         )
         stage.status = "failed"
         stage.finished_at = dj_timezone.now()
         return StageResult.FAILED
 
-    # ── Inspect response for blocked / error markers ───────────────────
-    if is_blocked(response):
+    # ── Check for error on the chat response ───────────────────────────
+    if response.error:
+        stage.status = "failed"
+        stage.finished_at = dj_timezone.now()
+        return StageResult.FAILED
+
+    # ── Retrieve parts via messages() (two-step SDK flow) ──────────────
+    items = await client.session.messages(session.id)
+    latest_parts = items[-1].parts if items else []
+
+    # ── Inspect parts for blocked marker ───────────────────────────────
+    if is_blocked(latest_parts):
         stage.status = "blocked"
         stage.finished_at = dj_timezone.now()
         pipeline.user_input_pending = True
         return StageResult.BLOCKED
-
-    if has_error(response):
-        stage.status = "failed"
-        stage.finished_at = dj_timezone.now()
-        return StageResult.FAILED
 
     # ── Default: completed ─────────────────────────────────────────────
     stage.status = "completed"

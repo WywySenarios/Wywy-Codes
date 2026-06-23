@@ -9,11 +9,10 @@ Tests the chain:
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from apps.orchestrator.agent_client import MessageResponse
 from apps.orchestrator.models import Pipeline, PipelineStage
 from apps.orchestrator.orchestrator import STAGE_ORDER
 
@@ -48,10 +47,10 @@ class TestBlockedFlow:
         )
 
         # ── Act: user responds via the API ─────────────────────────────────
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAgentClient:
-            mock_client = MockAgentClient.return_value
-            mock_client.send_message = AsyncMock(
-                return_value=MessageResponse(id="resp_1", parts=[]),
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAsyncOpencode:
+            mock_client = MockAsyncOpencode.return_value
+            mock_client.session.chat = AsyncMock(
+                return_value=MagicMock(error=None),
             )
             with patch("apps.orchestrator.views.wake_orchestrator"):
                 response = client.post(
@@ -65,10 +64,11 @@ class TestBlockedFlow:
         assert response.json() == {"status": "ok"}
 
         # The follow-up message was sent to the correct session
-        mock_client.send_message.assert_called_once_with(
-            "sess_blocked_integration",
-            parts=[{"type": "text", "text": "continue please"}],
-        )
+        mock_client.session.chat.assert_called_once()
+        call_kwargs = mock_client.session.chat.call_args.kwargs
+        assert call_kwargs["parts"] == [{"type": "text", "text": "continue please"}]
+        assert call_kwargs["model_id"] is not None
+        assert call_kwargs["provider_id"] is not None
 
         # Pipeline is no longer awaiting user input → orchestrator resumes
         pipeline.refresh_from_db()

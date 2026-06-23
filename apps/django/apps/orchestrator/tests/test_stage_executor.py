@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import enum
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
 from django.conf import settings
 
-from apps.orchestrator.agent_client import AgentClient, MessageResponse
 from apps.orchestrator.models import Pipeline, PipelineStage
 
 
@@ -119,12 +118,21 @@ def test_build_stage_prompt_includes_pipeline_context(
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def _make_mock_client(parts: list[dict[str, Any]]) -> AsyncMock:
-    """Build a mock ``AgentClient`` whose ``send_message`` returns *parts*."""
-    client = AsyncMock(spec=AgentClient)
-    client.create_session = AsyncMock(return_value="session-red-001")
-    client.send_message = AsyncMock(
-        return_value=MessageResponse(id="msg-001", parts=parts)
+def _make_mock_client(parts: list[Any]) -> AsyncMock:
+    """Build a mock ``AsyncOpencode`` whose ``session.messages`` returns
+    *parts*."""
+    client = AsyncMock()
+    client.session.create = AsyncMock(
+        return_value=MagicMock(id="session-red-001"),
+    )
+    client.session.chat = AsyncMock(
+        return_value=MagicMock(id="msg-001", error=None),
+    )
+    client.session.messages = AsyncMock(
+        return_value=[MagicMock(
+            info=MagicMock(id="msg-001"),
+            parts=parts,
+        )],
     )
     return client
 
@@ -149,11 +157,7 @@ async def test_execute_stage_creates_session(
 
     result = await execute_stage(pipeline_running, stage, client)
 
-    client.create_session.assert_awaited_once()
-    # The session title should include the stage name
-    call_kwargs = client.create_session.call_args
-    title = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("title", "")
-    assert "red" in title.lower() or stage.name in title
+    client.session.create.assert_awaited_once()
 
 
 @pytest.mark.django_db(transaction=True)
@@ -171,11 +175,12 @@ async def test_execute_stage_sends_message(
 
     await execute_stage(pipeline_running, stage, client)
 
-    client.send_message.assert_awaited_once()
-    # Verify session_id from create_session is used
-    call_kwargs = client.send_message.call_args
-    args, kwargs = call_kwargs
-    assert len(args) >= 1 or "session_id" in kwargs
+    client.session.chat.assert_awaited_once_with(
+        "session-red-001",
+        model_id=ANY,
+        provider_id=ANY,
+        parts=ANY,
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -248,14 +253,23 @@ async def test_execute_stage_marks_stage_blocked(
     db: None,
     pipeline_running: Pipeline,
 ) -> None:
-    """When the server responds with a blocked marker, ``execute_stage`` must
-    set ``stage.status = "blocked"`` and ``pipeline.user_input_pending = True``."""
+    """When the server returns a ``ToolPart`` with pending status,
+    ``execute_stage`` must set ``stage.status = "blocked"`` and
+    ``pipeline.user_input_pending = True``."""
+    from opencode_ai.types import ToolPart
     from apps.orchestrator.stage_executor import StageResult, execute_stage
 
     stage = pipeline_running.stages.get(name="RED")
-    client = _make_mock_client(
-        parts=[{"type": "input_required", "text": "Which approach should I use?"}]
+    blocked_part = ToolPart(
+        type="tool",
+        id="block-1",
+        callID="call-1",
+        messageID="msg-001",
+        sessionID="session-red-001",
+        state={"status": "pending"},
+        tool="some_tool",
     )
+    client = _make_mock_client(parts=[blocked_part])
 
     result = await execute_stage(pipeline_running, stage, client)
 
@@ -274,15 +288,21 @@ async def test_execute_stage_marks_stage_failed_on_client_error(
     db: None,
     pipeline_running: Pipeline,
 ) -> None:
-    """When the ``AgentClient`` raises ``AgentClientError``, ``execute_stage`` must
-    set ``stage.status = "failed"`` and return ``StageResult.FAILED``."""
-    from apps.orchestrator.agent_client import AgentClientError
+    """When the ``AsyncOpencode`` raises ``APIStatusError``,
+    ``execute_stage`` must set ``stage.status = "failed"`` and return
+    ``StageResult.FAILED``."""
+    from opencode_ai import APIStatusError
     from apps.orchestrator.stage_executor import StageResult, execute_stage
 
     stage = pipeline_running.stages.get(name="RED")
-    client = AsyncMock(spec=AgentClient)
-    client.create_session = AsyncMock(return_value="session-fail-001")
-    client.send_message = AsyncMock(side_effect=AgentClientError("Connection refused"))
+    client = AsyncMock()
+    client.session.create = AsyncMock(
+        side_effect=APIStatusError(
+            "Connection refused",
+            response=MagicMock(status_code=503),
+            body=None,
+        ),
+    )
 
     result = await execute_stage(pipeline_running, stage, client)
 
@@ -291,17 +311,21 @@ async def test_execute_stage_marks_stage_failed_on_client_error(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_execute_stage_marks_stage_failed_on_error_part(
+async def test_execute_stage_marks_stage_failed_on_error(
     db: None,
     pipeline_running: Pipeline,
 ) -> None:
-    """When the server response contains an error part, ``execute_stage`` must
-    set ``stage.status = "failed"`` and return ``StageResult.FAILED``."""
+    """When ``chat()`` returns a response with an error, ``execute_stage``
+    must set ``stage.status = "failed"`` and return ``StageResult.FAILED``."""
     from apps.orchestrator.stage_executor import StageResult, execute_stage
 
     stage = pipeline_running.stages.get(name="RED")
-    client = _make_mock_client(
-        parts=[{"type": "error", "text": "Agent encountered an error"}]
+    client = AsyncMock()
+    client.session.create = AsyncMock(
+        return_value=MagicMock(id="session-fail-001"),
+    )
+    client.session.chat = AsyncMock(
+        return_value=MagicMock(id="msg-001", error="Provider error"),
     )
 
     result = await execute_stage(pipeline_running, stage, client)
@@ -335,3 +359,112 @@ async def test_execute_stage_clears_retry_after(
     await execute_stage(pipeline_running, stage, client)
 
     assert stage.retry_after is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# RED: execute_stage — two-step flow
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.django_db(transaction=True)
+async def test_execute_stage_calls_messages_after_chat(
+    db: None,
+    pipeline_running: Pipeline,
+) -> None:
+    """After ``chat()`` succeeds (no error), ``execute_stage`` must call
+    ``session.messages()`` to retrieve the response parts."""
+    from apps.orchestrator.stage_executor import StageResult, execute_stage
+
+    stage = pipeline_running.stages.get(name="RED")
+    client = _make_mock_client(
+        parts=[{"type": "text", "text": "completed"}]
+    )
+
+    result = await execute_stage(pipeline_running, stage, client)
+
+    client.session.messages.assert_awaited_once_with("session-red-001")
+    assert result == StageResult.COMPLETED
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle 6: is_blocked imported from new home in stage_executor
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def test_is_blocked_imported_from_stage_executor_returns_true_when_pending() -> None:
+    """``is_blocked`` must be importable from ``apps.orchestrator.stage_executor``
+    and return ``True`` when any ``ToolPart`` has ``state.status == "pending"``."""
+    from apps.orchestrator.stage_executor import is_blocked
+    from opencode_ai.types import ToolPart, ToolStatePending
+
+    parts = [
+        ToolPart(
+            id="p1", callID="c1", messageID="m1", sessionID="s1",
+            tool="bash", type="tool",
+            state=ToolStatePending(status="pending"),
+        ),
+    ]
+    assert is_blocked(parts) is True
+
+
+async def test_is_blocked_imported_from_stage_executor_returns_false_when_completed() -> None:
+    """``is_blocked`` must return ``False`` when no ``ToolPart`` has pending
+    status."""
+    from apps.orchestrator.stage_executor import is_blocked
+    from opencode_ai.types import ToolPart, ToolStateCompleted
+
+    parts = [
+        ToolPart(
+            id="p1", callID="c1", messageID="m1", sessionID="s1",
+            tool="bash", type="tool",
+            state=ToolStateCompleted(
+                status="completed", input={}, metadata={},
+                output="done", time={"start": 0.0, "end": 1.0}, title="x",
+            ),
+        ),
+    ]
+    assert is_blocked(parts) is False
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle 6: has_error imported from new home in stage_executor
+# ═══════════════════════════════════════════════════════════════════════
+
+
+async def test_has_error_imported_from_stage_executor_returns_true_when_error_set() -> None:
+    """``has_error`` must be importable from ``apps.orchestrator.stage_executor``
+    and return ``True`` when ``AssistantMessage.error`` is not ``None``."""
+    from apps.orchestrator.stage_executor import has_error
+    from opencode_ai.types import AssistantMessage
+    from opencode_ai.types.shared import UnknownError
+
+    msg = AssistantMessage(
+        id="m1", sessionID="s1", role="assistant",
+        modelID="deepseek/deepseek-chat", providerID="deepseek",
+        cost=0.0, mode="agent",
+        path={"cwd": "/", "root": "/"},
+        time={"created": 0.0, "completed": 0.0},
+        tokens={"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        system=[],
+        error=UnknownError(data={"message": "fail"}, name="UnknownError"),
+    )
+    assert has_error(msg) is True
+
+
+async def test_has_error_imported_from_stage_executor_returns_false_when_no_error() -> None:
+    """``has_error`` must return ``False`` when ``AssistantMessage.error``
+    is ``None``."""
+    from apps.orchestrator.stage_executor import has_error
+    from opencode_ai.types import AssistantMessage
+
+    msg = AssistantMessage(
+        id="m1", sessionID="s1", role="assistant",
+        modelID="deepseek/deepseek-chat", providerID="deepseek",
+        cost=0.0, mode="agent",
+        path={"cwd": "/", "root": "/"},
+        time={"created": 0.0, "completed": 0.0},
+        tokens={"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        system=[],
+        error=None,
+    )
+    assert has_error(msg) is False

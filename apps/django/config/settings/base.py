@@ -156,6 +156,7 @@ OPENCODE_SERVER_HEALTH_RETRIES: int = int(environ.get("OPENCODE_SERVER_HEALTH_RE
 OPENCODE_SERVER_HEALTH_INTERVAL: float = float(environ.get("OPENCODE_SERVER_HEALTH_INTERVAL", "2.0"))
 OPENCODE_DEFAULT_MODEL: str = environ.get("OPENCODE_DEFAULT_MODEL", "anthropic/claude-sonnet-4-5")
 OPENCODE_SMALL_MODEL: str = environ.get("OPENCODE_SMALL_MODEL", "anthropic/claude-haiku-4-5")
+OPENCODE_WARMUP: bool = environ.get("OPENCODE_WARMUP", "1") == "1"
 STAGE_MODEL_MAP: dict[str, dict[str, str]] = {
     "init":       {"model": OPENCODE_DEFAULT_MODEL},
     "RED":        {"model": "deepseek/deepseek-chat"},

@@ -32,6 +32,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends clang-format \
 COPY opencode /usr/local/bin/opencode
 RUN chmod +x /usr/local/bin/opencode
 
+# Warm-up entrypoint — wraps opencode serve with model pre-loading
+COPY opencode-entrypoint.sh /usr/local/bin/opencode-entrypoint.sh
+RUN chmod +x /usr/local/bin/opencode-entrypoint.sh
+
 # Create wywy user (non-root)
 ARG CONTAINER_GID=1000
 RUN groupadd -g ${CONTAINER_GID} Wywy-Website && \
@@ -43,6 +47,10 @@ RUN mkdir -p /state /artifacts /context /logs /workspace && \
 
 USER wywy
 WORKDIR /workspace
+
+# Entrypoint — wraps opencode serve with model warm-up.
+# The runtime command (from container_manager.py) is passed as arguments.
+ENTRYPOINT ["/usr/local/bin/opencode-entrypoint.sh"]
 
 # Default command — overridden per stage
 CMD ["echo", "Container ready"]

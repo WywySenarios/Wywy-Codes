@@ -1,13 +1,31 @@
 services:
   django:
+    build:
+      context: ..
+      dockerfile: docker/django/Dockerfile.dev
+      args:
+        CONTAINER_GID: 2523
+        CONTAINER_UID: 25233
     restart: "no"
     secrets: []
+    env_file:
+      - /etc/Wywy-Website-Control/config/.env
+      - /etc/Wywy-Website-Control/config/.env.network
+      - /etc/Wywy-Website-Control/config/agentic/.env
     environment:
       - ENVIRONMENT=test
       - DJANGO_SETTINGS_MODULE=config.settings.base
+      - OPENCODE_INTEGRATION_TEST=1
       - DEEPSEEK_API_KEY=
       - OPENAI_API_KEY=
       - ANTHROPIC_API_KEY=
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/workspace/Wywy-Website:/var/workspace/Wywy-Website
+      - /var/log/Wywy-Website/agentic:/var/log/Wywy-Website/agentic
+      - /var/lib/Wywy-Website/orchestrator:/var/lib/Wywy-Website/orchestrator
+      - /etc/Wywy-Website-Control:/etc/Wywy-Website-Control:ro
+      - /usr/local/Wywy-Website:/usr/local/Wywy-Website:ro
     command:
       - bash
       - -c

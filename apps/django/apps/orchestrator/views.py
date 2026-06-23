@@ -9,6 +9,7 @@ Django ORM models and DRF serializers explicitly.
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import docker
@@ -23,10 +24,88 @@ from django.http import (
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 
-from apps.orchestrator.agent_client import AgentClient, AgentClientError, part_to_log_entry
+from opencode_ai import APIStatusError, AsyncOpencode
+from opencode_ai.types import (
+    FilePart,
+    Part,
+    SnapshotPart,
+    StepFinishPart,
+    StepStartPart,
+    TextPart,
+    ToolPart,
+)
+
 from apps.orchestrator.models import Pipeline, PipelineStage
 from apps.orchestrator.orchestrator import abort_pipeline, wake_orchestrator
 from apps.orchestrator.serializers import pipeline_to_dict, stage_to_dict
+
+
+# ── SDK type → log-entry mapping ─────────────────────────────────────
+
+
+_PART_TYPE_MAP: dict[str, str] = {
+    "text": "text",
+    "tool": "tool_use",
+    "step-start": "step_start",
+    "step-finish": "step_finish",
+    "file": "file",
+    "snapshot": "snapshot",
+}
+
+
+def part_to_log_entry(part: dict | Part) -> dict:
+    """Convert an opencode message part to a structured log entry.
+
+    Accepts both legacy ``dict`` parts and SDK typed ``Part`` models.
+
+    The returned dict has at least ``ts``, ``type``, and ``content`` keys
+    so that session-derived entries have a uniform shape for the frontend.
+    """
+    entry: dict = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if isinstance(part, dict):
+        # ── Legacy dict-based part ─────────────────────────────────
+        entry["type"] = part.get("type", "unknown")
+        ptype = entry["type"]
+        if ptype == "text":
+            entry["content"] = part.get("text", "")
+        elif ptype == "tool_use":
+            entry["content"] = json.dumps(part.get("input", {}))
+            if "name" in part:
+                entry["name"] = part["name"]
+        elif ptype == "tool_result":
+            entry["content"] = part.get("content", part.get("text", ""))
+        elif ptype == "input_required":
+            entry["content"] = json.dumps(
+                {k: v for k, v in part.items() if k != "type"}
+            )
+        else:
+            entry["content"] = (
+                part.get("text") or part.get("content") or json.dumps(part)
+            )
+        return entry
+
+    # ── SDK typed Part model ───────────────────────────────────────
+    entry["type"] = _PART_TYPE_MAP.get(part.type, part.type)
+
+    if isinstance(part, TextPart):
+        entry["content"] = part.text
+    elif isinstance(part, ToolPart):
+        state_input = getattr(part.state, "input", {})
+        entry["content"] = json.dumps(state_input) if state_input else ""
+        if part.tool:
+            entry["name"] = part.tool
+    elif isinstance(part, (StepStartPart, StepFinishPart)):
+        entry["content"] = ""
+    elif isinstance(part, FilePart):
+        entry["content"] = part.url or ""
+    elif isinstance(part, SnapshotPart):
+        entry["content"] = part.snapshot or ""
+    else:
+        entry["content"] = ""
+    return entry
 
 
 def api_pipelines(request: HttpRequest) -> HttpResponse:
@@ -147,15 +226,15 @@ def _list_pipeline_files(workspace: Path, verbose: bool) -> dict[str, list[dict[
     return files
 
 
-def _build_agent_client(pipeline: Pipeline) -> AgentClient:
-    """Construct an ``AgentClient`` connected to the pipeline's container.
+def _build_sdk_client(pipeline: Pipeline) -> AsyncOpencode:
+    """Construct an ``AsyncOpencode`` client connected to the pipeline's container.
 
     Resolves the container's IP address on the agent network via the
-    Docker SDK and returns a client configured with the server password.
+    Docker SDK and returns a client configured for the opencode server.
 
     When *pipeline* has no ``container_id`` (e.g. in test or transitional
     state), falls back to the configured hostname — enough for the
-    ``AgentClient`` to be constructed; in production the container must
+    ``AsyncOpencode`` to be constructed; in production the container must
     exist for message delivery to succeed.
     """
     if pipeline.container_id:
@@ -170,10 +249,22 @@ def _build_agent_client(pipeline: Pipeline) -> AgentClient:
             f"http://{settings.OPENCODE_SERVER_HOSTNAME}:"
             f"{settings.OPENCODE_SERVER_PORT}"
         )
-    return AgentClient(
+    password = settings.OPENCODE_SERVER_PASSWORD
+    return AsyncOpencode(
         base_url=base_url,
-        password=settings.OPENCODE_SERVER_PASSWORD,
+        timeout=300.0,
+        max_retries=2,
+        default_headers={"Authorization": f"Bearer {password}"} if password else None,
     )
+
+
+def _resolve_provider(model_id: str) -> str:
+    """Extract the provider name from a model identifier.
+
+    Returns the segment before ``/`` (e.g. ``"deepseek/deepseek-chat"`` → ``"deepseek"``).
+    If the model has no ``/``, returns the model as-is.
+    """
+    return model_id.split("/")[0]
 
 
 @csrf_exempt
@@ -214,13 +305,15 @@ def api_respond(request: HttpRequest, pipeline_id: str) -> HttpResponse:
         )
 
     # ── Send the user's response to the opencode session ────────────────
-    agent = _build_agent_client(pipeline)
+    client = _build_sdk_client(pipeline)
     try:
-        async_to_sync(agent.send_message)(
+        async_to_sync(client.session.chat)(
             blocked_stage.session_id,
+            model_id=settings.OPENCODE_DEFAULT_MODEL,
+            provider_id=_resolve_provider(settings.OPENCODE_DEFAULT_MODEL),
             parts=[{"type": "text", "text": response_text}],
         )
-    except AgentClientError:
+    except APIStatusError:
         return JsonResponse(
             {"error": "Failed to deliver response to agent session"},
             status=502,
@@ -332,7 +425,7 @@ def api_stage_logs(request: HttpRequest, pipeline_id: str, stage_name: str) -> H
     """Return structured log entries for a specific pipeline stage.
 
     When the stage has a ``session_id``, fetches typed message parts from
-    the opencode server via ``AgentClient.get_session_messages()`` and
+    the opencode server via ``AsyncOpencode.session.messages()`` and
     transforms them into log entries with ``type`` and ``content`` fields.
 
     Otherwise, falls back to reading ``{stage_name}.log`` from the
@@ -359,13 +452,13 @@ def api_stage_logs(request: HttpRequest, pipeline_id: str, stage_name: str) -> H
 
     # ── 1. Source — session messages or file-based stage log ──────────
     if stage.session_id:
-        agent = _build_agent_client(pipeline)
+        client = _build_sdk_client(pipeline)
         try:
-            messages = async_to_sync(agent.get_session_messages)(stage.session_id)
-        except AgentClientError:
-            messages = []
-        for msg in messages:
-            for part in msg.parts:
+            items = async_to_sync(client.session.messages)(stage.session_id)
+        except APIStatusError:
+            items = []
+        for item in items:
+            for part in item.parts:
                 entries.append(part_to_log_entry(part))
     else:
         stage_log_path = log_dir / f"{stage_name}.log"

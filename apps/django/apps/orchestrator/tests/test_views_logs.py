@@ -8,9 +8,7 @@ entries and sorted by timestamp.
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
-
-from apps.orchestrator.agent_client import MessageWithParts
+from unittest.mock import AsyncMock, MagicMock, patch
 
 
 class TestApiStageLogs:
@@ -30,18 +28,18 @@ class TestApiStageLogs:
         """When stage has ``session_id``, returns typed entries from session
         messages with ``type`` and ``content`` fields."""
         pipeline = pipeline_blocked_with_session
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAC:
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAC:
             mock_client = MockAC.return_value
-            mock_client.get_session_messages = AsyncMock(
+            mock_client.session.messages = AsyncMock(
                 return_value=[
-                    MessageWithParts(id="m1", parts=[
+                    MagicMock(parts=[
                         {"type": "text", "text": "Hello from agent"},
                     ]),
-                    MessageWithParts(id="m2", parts=[
+                    MagicMock(parts=[
                         {"type": "tool_use", "name": "bash",
                          "input": {"command": "echo hi"}},
                     ]),
-                    MessageWithParts(id="m3", parts=[
+                    MagicMock(parts=[
                         {"type": "tool_result", "content": "hi\n"},
                     ]),
                 ],
@@ -94,11 +92,11 @@ class TestApiStageLogs:
             }) + "\n"
         )
 
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAC:
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAC:
             mock_client = MockAC.return_value
-            mock_client.get_session_messages = AsyncMock(
+            mock_client.session.messages = AsyncMock(
                 return_value=[
-                    MessageWithParts(id="m1", parts=[
+                    MagicMock(parts=[
                         {"type": "text", "text": "agent message"},
                     ]),
                 ],
@@ -168,11 +166,11 @@ class TestApiStageLogs:
     ) -> None:
         """``?lines=N`` limits returned entries to the last N."""
         pipeline = pipeline_blocked_with_session
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAC:
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAC:
             mock_client = MockAC.return_value
-            mock_client.get_session_messages = AsyncMock(
+            mock_client.session.messages = AsyncMock(
                 return_value=[
-                    MessageWithParts(id=f"m{i}", parts=[
+                    MagicMock(parts=[
                         {"type": "text", "text": f"msg {i}"},
                     ])
                     for i in range(10)
@@ -230,3 +228,94 @@ class TestApiStageLogs:
             self.url(pipeline.id, "RED") + "?lines=notanumber"
         )
         assert response.status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Cycle 6: part_to_log_entry imported from new home in views
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def test_part_to_log_entry_imported_from_views_text_part() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``TextPart`` to a log entry with ``type="text"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import TextPart
+
+    part = TextPart(id="p1", messageID="m1", sessionID="s1", text="hello", type="text")
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "text"
+    assert entry["content"] == "hello"
+    assert "ts" in entry
+
+
+def test_part_to_log_entry_imported_from_views_tool_part() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``ToolPart`` to a log entry with ``type="tool_use"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import ToolPart, ToolStateCompleted
+
+    state = ToolStateCompleted(
+        status="completed", input={"cmd": "ls"}, metadata={},
+        output="files", time={"start": 0.0, "end": 1.0}, title="List",
+    )
+    part = ToolPart(
+        id="p2", callID="c1", messageID="m1", sessionID="s1",
+        tool="bash", type="tool", state=state,
+    )
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "tool_use"
+    assert "content" in entry
+
+
+def test_part_to_log_entry_imported_from_views_step_start() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``StepStartPart`` to a log entry with ``type="step_start"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import StepStartPart
+
+    part = StepStartPart(id="p3", messageID="m1", sessionID="s1", type="step-start")
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "step_start"
+
+
+def test_part_to_log_entry_imported_from_views_step_finish() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``StepFinishPart`` to a log entry with ``type="step_finish"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import StepFinishPart
+
+    part = StepFinishPart(
+        id="p4", messageID="m1", sessionID="s1", type="step-finish",
+        cost=0.0,
+        tokens={"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+    )
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "step_finish"
+
+
+def test_part_to_log_entry_imported_from_views_file_part() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``FilePart`` to a log entry with ``type="file"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import FilePart
+
+    part = FilePart(id="p5", messageID="m1", sessionID="s1", type="file", mime="text/plain", url="/tmp/f.txt")
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "file"
+
+
+def test_part_to_log_entry_imported_from_views_snapshot_part() -> None:
+    """``part_to_log_entry`` must be importable from ``apps.orchestrator.views``
+    and convert a ``SnapshotPart`` to a log entry with ``type="snapshot"``."""
+    from apps.orchestrator.views import part_to_log_entry
+    from opencode_ai.types import SnapshotPart
+
+    part = SnapshotPart(id="p6", messageID="m1", sessionID="s1", type="snapshot", snapshot="content")
+    entry = part_to_log_entry(part)
+
+    assert entry["type"] == "snapshot"

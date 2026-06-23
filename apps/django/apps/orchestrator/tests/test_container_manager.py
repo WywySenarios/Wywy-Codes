@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _pytest.monkeypatch import MonkeyPatch
@@ -371,14 +371,13 @@ def test_stop_container_looks_up_container_by_pipeline_container_id(
 
 
 @pytest.mark.django_db(transaction=True)
-async def test_wait_healthy_returns_agent_client_when_healthy(
+async def test_wait_healthy_returns_sdk_client_when_healthy(
     db: None,
     monkeypatch: MonkeyPatch,
 ) -> None:
     """``wait_healthy`` must poll ``/global/health`` and return an
-    ``AgentClient`` when the server responds 200."""
+    ``AsyncOpencode`` when the server responds 200."""
     from apps.orchestrator.container_manager import ContainerManager
-    from apps.orchestrator.agent_client import AgentClient
 
     # Mock Docker — container with known IP
     mock_client = MockDockerClient()
@@ -387,12 +386,19 @@ async def test_wait_healthy_returns_agent_client_when_healthy(
         lambda: mock_client,
     )
 
-    # Mock AgentClient — health_check returns True
-    mock_agent = AsyncMock(spec=AgentClient)
-    mock_agent.health_check = AsyncMock(return_value=True)
+    # Mock AsyncOpencode — health via _client.get, warmup via session
+    mock_agent = AsyncMock()
+    mock_agent._client.get = AsyncMock(
+        return_value=MagicMock(status_code=200),
+    )
+    mock_agent.session.create = AsyncMock(
+        return_value=MagicMock(id="warmup-session"),
+    )
+    mock_agent.session.chat = AsyncMock()
     monkeypatch.setattr(
-        "apps.orchestrator.container_manager.AgentClient",
-        lambda base_url, password=None: mock_agent,
+        "apps.orchestrator.container_manager.AsyncOpencode",
+        lambda base_url, timeout=None, max_retries=None,
+               default_headers=None: mock_agent,
     )
 
     mgr = ContainerManager()
@@ -406,10 +412,9 @@ async def test_wait_healthy_polls_several_times_before_succeeding(
     db: None,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    """``wait_healthy`` must poll ``health_check`` multiple times and
+    """``wait_healthy`` must poll ``_client.get`` multiple times and
     only return once it succeeds."""
     from apps.orchestrator.container_manager import ContainerManager
-    from apps.orchestrator.agent_client import AgentClient
 
     mock_client = MockDockerClient()
     monkeypatch.setattr(
@@ -417,20 +422,28 @@ async def test_wait_healthy_polls_several_times_before_succeeding(
         lambda: mock_client,
     )
 
-    # Return False once, then True — proves retry loop
-    health_results = [False, True]
-    mock_agent = AsyncMock(spec=AgentClient)
-    mock_agent.health_check = AsyncMock(side_effect=lambda: health_results.pop(0))
+    # Return 503 once, then 200 — proves retry loop
+    responses = [
+        MagicMock(status_code=503),
+        MagicMock(status_code=200),
+    ]
+    mock_agent = AsyncMock()
+    mock_agent._client.get = AsyncMock(side_effect=responses)
+    mock_agent.session.create = AsyncMock(
+        return_value=MagicMock(id="warmup-session"),
+    )
+    mock_agent.session.chat = AsyncMock()
     monkeypatch.setattr(
-        "apps.orchestrator.container_manager.AgentClient",
-        lambda base_url, password=None: mock_agent,
+        "apps.orchestrator.container_manager.AsyncOpencode",
+        lambda base_url, timeout=None, max_retries=None,
+               default_headers=None: mock_agent,
     )
 
     mgr = ContainerManager()
     result = await mgr.wait_healthy("abc12345", timeout=5)
 
     assert result is mock_agent
-    assert mock_agent.health_check.await_count == 2
+    assert mock_agent._client.get.await_count == 2
 
 
 @pytest.mark.django_db(transaction=True)
@@ -441,7 +454,6 @@ async def test_wait_healthy_raises_timeout_error_on_exhaustion(
     """``wait_healthy`` must raise ``TimeoutError`` when the server does
     not become healthy within the configured timeout."""
     from apps.orchestrator.container_manager import ContainerManager
-    from apps.orchestrator.agent_client import AgentClient
 
     mock_client = MockDockerClient()
     monkeypatch.setattr(
@@ -450,11 +462,14 @@ async def test_wait_healthy_raises_timeout_error_on_exhaustion(
     )
 
     # Always unhealthy — triggers timeout
-    mock_agent = AsyncMock(spec=AgentClient)
-    mock_agent.health_check = AsyncMock(return_value=False)
+    mock_agent = AsyncMock()
+    mock_agent._client.get = AsyncMock(
+        return_value=MagicMock(status_code=503),
+    )
     monkeypatch.setattr(
-        "apps.orchestrator.container_manager.AgentClient",
-        lambda base_url, password=None: mock_agent,
+        "apps.orchestrator.container_manager.AsyncOpencode",
+        lambda base_url, timeout=None, max_retries=None,
+               default_headers=None: mock_agent,
     )
 
     mgr = ContainerManager()

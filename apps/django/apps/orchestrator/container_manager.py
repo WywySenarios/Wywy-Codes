@@ -12,9 +12,9 @@ from pathlib import Path
 
 import docker
 from django.conf import settings
+from opencode_ai import AsyncOpencode
 
 from apps.orchestrator import orchestrator
-from apps.orchestrator.agent_client import AgentClient
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class ContainerManager:
             "PIPELINE_ID": str(pipeline.id),
             "HOME": "/home/wywy",
             "OPENCODE_SERVER_PASSWORD": settings.OPENCODE_SERVER_PASSWORD,
+            "OPENCODE_WARMUP": "1" if settings.OPENCODE_WARMUP else "0",
             "OPENCODE_API_KEY": getattr(settings, "AGENT_OPENCODE_API_KEY", ""),
             "DEEPSEEK_API_KEY": getattr(settings, "AGENT_DEEPSEEK_API_KEY", ""),
             "OPENAI_API_KEY": getattr(settings, "AGENT_OPENAI_API_KEY", ""),
@@ -97,17 +98,17 @@ class ContainerManager:
 
     async def wait_healthy(
         self, container_id: str, timeout: float = 30
-    ) -> AgentClient:
+    ) -> AsyncOpencode:
         """Poll the container's health endpoint until it responds 200.
 
-        Returns the ``AgentClient`` instance used to check health.
+        Returns the ``AsyncOpencode`` instance used to check health.
         Raises ``TimeoutError`` if the server does not become healthy
         within the configured timeout.
 
         This method is genuinely async — ``docker.from_env()`` and
         ``container.reload()`` are offloaded to ``asyncio.to_thread``
         (they don't touch the database), while ``await
-        agent.health_check()`` and ``await asyncio.sleep()`` respect the
+        agent._client.get()`` and ``await asyncio.sleep()`` respect the
         event loop.
         """
         client = await asyncio.to_thread(docker.from_env)
@@ -119,9 +120,14 @@ class ContainerManager:
             settings.AGENT_NETWORK
         ]["IPAddress"]
         base_url = f"http://{ip}:{settings.OPENCODE_SERVER_PORT}"
-        agent = AgentClient(
+        password = settings.OPENCODE_SERVER_PASSWORD
+        agent = AsyncOpencode(
             base_url=base_url,
-            password=settings.OPENCODE_SERVER_PASSWORD,
+            timeout=300.0,
+            max_retries=2,
+            default_headers={"Authorization": f"Bearer {password}"}
+            if password
+            else None,
         )
 
         deadline = asyncio.get_event_loop().time() + timeout
@@ -132,7 +138,41 @@ class ContainerManager:
                     f"Container {container_id} did not become healthy "
                     f"within {timeout}s"
                 )
-            healthy = await agent.health_check()
+            resp = await agent._client.get("/global/health")
+            healthy = resp.status_code == 200
             if healthy:
+                # Server is running — optionally warm up the model so
+                # the first real request doesn't pay the cold-start
+                # penalty.  Controlled by the OPENCODE_WARMUP setting.
+                if settings.OPENCODE_WARMUP:
+                    await self._warmup_model(agent)
                 return agent
             await asyncio.sleep(1)
+
+    async def _warmup_model(self, agent: AsyncOpencode) -> None:
+        """Send a warm-up message to trigger model inference.
+
+        Best-effort — failures are logged but not propagated.
+        """
+        try:
+            warmup_session = await agent.session.create()
+            if warmup_session:
+                logger.info(
+                    "Warming up model (session %s)", warmup_session.id
+                )
+                model_id = settings.OPENCODE_DEFAULT_MODEL
+                provider_id = model_id.split("/")[0]
+                await agent.session.chat(
+                    warmup_session.id,
+                    model_id=model_id,
+                    provider_id=provider_id,
+                    parts=[
+                        {
+                            "type": "text",
+                            "text": "Respond with one word: ready",
+                        }
+                    ],
+                )
+                logger.info("Model warm-up complete")
+        except Exception:
+            logger.warning("Model warm-up failed (non-fatal)")

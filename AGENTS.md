@@ -49,6 +49,32 @@ in the compose override files.
 
 External deployment config is loaded from `/etc/Wywy-Website-Control/config/agentic/`.
 
+## Running tests
+
+Run the full test suite (including integration tests against a real opencode server container) from any working directory:
+
+```bash
+/etc/Wywy-Website-Control/run.sh agentic test up
+```
+
+This uses the ``test`` target of the agentic service script, which merges the
+base, dev, and test docker-compose files, loads the production env files (CORS
+configuration, API keys, etc.), builds the dev Django image, and starts the
+services.  The Django service runs ``pytest`` as its entrypoint and shuts down
+automatically after completion.  The ``astro`` dev server also starts
+concurrently (frontend tests are separate).
+
+The test docker-compose file mounts the Docker socket so integration tests can
+spawn real opencode server containers.  The environment variable
+``OPENCODE_INTEGRATION_TEST=1`` is set so those tests run; they were previously
+skipped by default.
+
+> **Note:** To run only the backend tests without the Astro frontend service,
+> invoke the agentic script directly:
+> ```bash
+> /etc/Wywy-Website-Control/scripts/run/agentic.sh run test --rm django
+> ```
+
 ## Stack
 
 - **django** — orchestrator backend (DRF, pipeline executor)

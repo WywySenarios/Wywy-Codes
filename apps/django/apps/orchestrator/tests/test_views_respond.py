@@ -1,8 +1,8 @@
 """Tests for POST /api/pipelines/<uuid:id>/respond/ endpoint.
 
-The new session-based respond flow:
+The session-based respond flow:
 - Look up the blocked stage (``status="blocked"``) on the pipeline
-- Send the user's response as a follow-up message via ``AgentClient.send_message()``
+- Send the user's response as a follow-up message via ``AsyncOpencode.session.chat()``
 - Clear ``pipeline.user_input_pending``
 - Call ``wake_orchestrator()``
 """
@@ -10,11 +10,9 @@ The new session-based respond flow:
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
-from apps.orchestrator.agent_client import MessageResponse
 
 
 class TestRespond:
@@ -28,10 +26,10 @@ class TestRespond:
     ) -> None:
         """Happy path: user responds → message sent to opencode session
         → ``user_input_pending`` cleared → ``wake_orchestrator`` called."""
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAgentClient:
-            mock_client = MockAgentClient.return_value
-            mock_client.send_message = AsyncMock(
-                return_value=MessageResponse(id="resp_1", parts=[]),
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAsyncOpencode:
+            mock_client = MockAsyncOpencode.return_value
+            mock_client.session.chat = AsyncMock(
+                return_value=MagicMock(error=None),
             )
 
             response = client.post(
@@ -43,15 +41,16 @@ class TestRespond:
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
 
-        # AgentClient was constructed
-        MockAgentClient.assert_called_once()
+        # AsyncOpencode was constructed
+        MockAsyncOpencode.assert_called_once()
 
-        # send_message was called with the blocked stage's session_id
-        # and the user's response as a text part.
-        mock_client.send_message.assert_called_once_with(
-            "sess_123",
-            parts=[{"type": "text", "text": "use red please"}],
-        )
+        # session.chat was called with the blocked stage's session_id,
+        # model, provider, and the user's response as a text part.
+        mock_client.session.chat.assert_called_once()
+        call_kwargs = mock_client.session.chat.call_args.kwargs
+        assert call_kwargs["parts"] == [{"type": "text", "text": "use red please"}]
+        assert call_kwargs["model_id"] is not None
+        assert call_kwargs["provider_id"] is not None
 
         # user_input_pending was cleared in the database
         pipeline_blocked_with_session.refresh_from_db()
@@ -66,10 +65,10 @@ class TestRespond:
     ) -> None:
         """When ``selected_option`` is provided, it is prepended to the
         message text sent to the session."""
-        with patch("apps.orchestrator.views.AgentClient", create=True) as MockAgentClient:
-            mock_client = MockAgentClient.return_value
-            mock_client.send_message = AsyncMock(
-                return_value=MessageResponse(id="resp_1", parts=[]),
+        with patch("apps.orchestrator.views.AsyncOpencode", create=True) as MockAsyncOpencode:
+            mock_client = MockAsyncOpencode.return_value
+            mock_client.session.chat = AsyncMock(
+                return_value=MagicMock(error=None),
             )
 
             response = client.post(
@@ -84,8 +83,8 @@ class TestRespond:
         assert response.status_code == 200
 
         # selected_option is prepended to the text
-        assert mock_client.send_message.call_count == 1
-        parts = mock_client.send_message.call_args.kwargs["parts"]
+        assert mock_client.session.chat.call_count == 1
+        parts = mock_client.session.chat.call_args.kwargs["parts"]
         assert len(parts) == 1
         assert parts[0]["type"] == "text"
         assert "[Selected option: red]" in parts[0]["text"]

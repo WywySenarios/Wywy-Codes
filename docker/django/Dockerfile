@@ -37,7 +37,8 @@ RUN pip install --no-cache-dir \
     pytest \
     pytest-django \
     pytest-asyncio \
-    httpx>=0.27
+    httpx>=0.27 \
+    opencode-ai>=0.1.0-alpha.36
 
 ARG CONTAINER_GID=2523
 ARG CONTAINER_UID=25233
@@ -59,6 +60,11 @@ COPY apps/django/manage.py     /app/
 
 COPY --from=astro-build /astro/dist /app/astro-dist
 ENV ASTRO_DIST=/app/astro-dist
+
+# Make all app files owned and writable by wywy regardless of host umask.
+# Docker COPY preserves source permission bits but resets ownership to
+# root, so files with mode 640 become inaccessible to non-root users.
+RUN chown -R wywy:Wywy-Website /app/ && chmod -R g+rwX /app/
 
 USER wywy
 

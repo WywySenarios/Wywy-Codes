@@ -18,7 +18,8 @@ import docker
 import pytest
 from django.conf import settings
 
-from apps.orchestrator.agent_client import AgentClient
+from opencode_ai import AsyncOpencode
+
 from apps.orchestrator.container_manager import ContainerManager
 from apps.orchestrator.models import Pipeline, PipelineStage
 from apps.orchestrator.stage_executor import StageResult, build_stage_prompt, execute_stage
@@ -111,7 +112,7 @@ class TestIntegrationOpencode:
             # Server must become healthy
             agent = await cm.wait_healthy(container_id, timeout=60)
             assert agent is not None
-            assert isinstance(agent, AgentClient)
+            assert isinstance(agent, AsyncOpencode)
 
             # Health check must return True
             healthy = await agent.health_check()
