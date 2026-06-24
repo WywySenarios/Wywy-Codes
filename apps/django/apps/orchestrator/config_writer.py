@@ -14,24 +14,24 @@ from typing import Any
 from django.conf import settings
 
 from apps.orchestrator.models import Pipeline
-from apps.orchestrator.orchestrator import STAGE_ORDER
+from apps.orchestrator.orchestrator import STAGE_ORDER, _read_api_key
 
 
 def _detect_disabled_providers() -> list[str]:
     """Return a list of provider names whose API keys are missing.
 
-    Checks Django settings for known provider API key constants.
+    Checks secret files via ``_read_api_key`` for each known provider.
     A provider is disabled when its key is empty or missing.
     """
     provider_keys: dict[str, str] = {
-        "openai": "AGENT_OPENAI_API_KEY",
-        "anthropic": "AGENT_ANTHROPIC_API_KEY",
-        "deepseek": "AGENT_DEEPSEEK_API_KEY",
-        "opencode": "AGENT_OPENCODE_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "opencode": "OPENCODE_API_KEY",
     }
     disabled: list[str] = []
     for provider, key_name in provider_keys.items():
-        value = getattr(settings, key_name, "")
+        value = _read_api_key(key_name)
         if not value:
             disabled.append(provider)
     return disabled

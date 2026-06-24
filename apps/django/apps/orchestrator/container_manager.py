@@ -58,10 +58,10 @@ class ContainerManager:
             "HOME": "/home/wywy",
             "OPENCODE_SERVER_PASSWORD": settings.OPENCODE_SERVER_PASSWORD,
             "OPENCODE_WARMUP": "1" if settings.OPENCODE_WARMUP else "0",
-            "OPENCODE_API_KEY": getattr(settings, "AGENT_OPENCODE_API_KEY", ""),
-            "DEEPSEEK_API_KEY": getattr(settings, "AGENT_DEEPSEEK_API_KEY", ""),
-            "OPENAI_API_KEY": getattr(settings, "AGENT_OPENAI_API_KEY", ""),
-            "ANTHROPIC_API_KEY": getattr(settings, "AGENT_ANTHROPIC_API_KEY", ""),
+            "OPENCODE_API_KEY": orchestrator._read_api_key("OPENCODE_API_KEY"),
+            "DEEPSEEK_API_KEY": orchestrator._read_api_key("DEEPSEEK_API_KEY"),
+            "OPENAI_API_KEY": orchestrator._read_api_key("OPENAI_API_KEY"),
+            "ANTHROPIC_API_KEY": orchestrator._read_api_key("ANTHROPIC_API_KEY"),
         }
 
         # ── Spawn container ─────────────────────────────────────────────
