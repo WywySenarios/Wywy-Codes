@@ -1498,6 +1498,29 @@ def _read_github_token() -> Optional[str]:
         return None
 
 
+def _read_api_key(key_name: str, secrets_dir: str | None = None) -> str:
+    """Read an API key from a Docker-style secret file.
+
+    The file name is derived from *key_name* by lowercasing and replacing
+    underscores with hyphens (e.g. ``"OPENCODE_API_KEY"`` →
+    ``"opencode-api-key"``).  The file is read from *secrets_dir* if given,
+    otherwise from ``settings.API_KEY_SECRETS_DIR`` (default
+    ``/run/secrets``).
+
+    Returns the trimmed file content, or an empty string if the file does
+    not exist or cannot be read (matching the previous fallback of
+    ``getattr(settings, …, "")``).
+    """
+    if secrets_dir is None:
+        secrets_dir = settings.API_KEY_SECRETS_DIR
+    filename = key_name.lower().replace("_", "-")
+    filepath = Path(secrets_dir) / filename
+    try:
+        return filepath.read_text().strip()
+    except (FileNotFoundError, PermissionError):
+        return ""
+
+
 def _build_subprocess_env(extra: dict[str, str]) -> dict[str, str]:
     """Build a minimal environment for subprocess calls, avoiding secret leakage.
 

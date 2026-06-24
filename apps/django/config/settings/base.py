@@ -145,6 +145,7 @@ PIPELINE_RETRY_BACKOFF_SECONDS: list[int] = [
 ]
 WEB_CONCURRENCY: int = int(environ.get("WEB_CONCURRENCY", "2"))
 GITHUB_TOKEN_FILE: str = environ.get("GITHUB_TOKEN_FILE", "/run/secrets/github-pat")
+API_KEY_SECRETS_DIR: str = environ.get("API_KEY_SECRETS_DIR", "/run/secrets")
 WORKSPACE_ROOT: str = environ.get("WORKSPACE_ROOT", "/var/workspace/Wywy-Website")
 CONTROL_REPO_PATH: str = environ.get("CONTROL_REPO_PATH", "/etc/Wywy-Website-Control")
 AGENT_NETWORK: str = environ.get("AGENT_NETWORK", "wywy-agent-net")
