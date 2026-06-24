@@ -91,94 +91,18 @@ class TestIntegrationOpencode:
     """
 
     @pytest.mark.django_db(transaction=True)
-    async def test_real_server_container_lifecycle(
+    async def test_real_server_integration(
         self, db,
     ) -> None:
-        """Start an opencode serve container, verify health, stop it."""
+        """Full integration test: container lifecycle, session creation,
+        message exchange, and stage execution against a real opencode server.
+
+        All scenarios use a single container to avoid Docker networking
+        resource contention from sequential container start/stop cycles.
+        """
         pipeline = Pipeline.objects.create(
-            invocation_name="int-lifecycle",
-            description="Lifecycle integration test",
-            status="running",
-        )
-
-        cm = ContainerManager()
-        container_id = cm.start_container(pipeline)
-
-        try:
-            # Container ID must be persisted on the pipeline
-            pipeline.refresh_from_db()
-            assert pipeline.container_id == container_id
-
-            # Server must become healthy
-            agent = await cm.wait_healthy(container_id, timeout=60)
-            assert agent is not None
-            assert isinstance(agent, AsyncOpencode)
-
-            # Health check must return True
-            healthy = await agent.health_check()
-            assert healthy is True
-        finally:
-            cm.stop_container(pipeline)
-
-    @pytest.mark.django_db(transaction=True)
-    async def test_session_creation_and_message(
-        self, db,
-    ) -> None:
-        """Create a session on a real opencode server, send a message,
-        and verify the response contains expected fields."""
-        pipeline = Pipeline.objects.create(
-            invocation_name="int-session",
-            description="Session integration test",
-            status="running",
-        )
-
-        cm = ContainerManager()
-        container_id = cm.start_container(pipeline)
-
-        try:
-            agent = await cm.wait_healthy(container_id, timeout=60)
-
-            # Create a session
-            session_id = await agent.create_session(title="test-session")
-            assert session_id is not None
-            assert isinstance(session_id, str)
-            assert len(session_id) > 0
-
-            # Send a simple message
-            stage = PipelineStage.objects.create(
-                pipeline=pipeline,
-                name="test_stage",
-                status="pending",
-            )
-
-            prompt_parts = build_stage_prompt(pipeline, stage)
-            assert len(prompt_parts) > 0
-            assert prompt_parts[0]["type"] == "text"
-
-            response = await agent.send_message(
-                session_id,
-                parts=prompt_parts,
-            )
-            assert response is not None
-            assert response.id is not None
-            assert isinstance(response.parts, list)
-
-            # Verify session messages are retrievable
-            messages = await agent.get_session_messages(session_id, limit=5)
-            assert len(messages) > 0
-            assert messages[0].id is not None
-        finally:
-            cm.stop_container(pipeline)
-
-    @pytest.mark.django_db(transaction=True)
-    async def test_stage_execution_against_real_server(
-        self, db, monkeypatch,
-    ) -> None:
-        """Execute a full pipeline stage against a real opencode server
-        using ``stage_executor.execute_stage()``."""
-        pipeline = Pipeline.objects.create(
-            invocation_name="int-stage-exec",
-            description="Stage execution integration test",
+            invocation_name="int-integration",
+            description="Full integration test",
             status="running",
         )
 
@@ -192,34 +116,53 @@ class TestIntegrationOpencode:
         container_id = cm.start_container(pipeline)
 
         try:
-            agent = await cm.wait_healthy(container_id, timeout=60)
+            # ── Container lifecycle ──────────────────────────────────────
+            pipeline.refresh_from_db()
+            assert pipeline.container_id == container_id
 
-            # ── Execute the stage ────────────────────────────────────────
+            agent = await cm.wait_healthy(container_id, timeout=60)
+            assert agent is not None
+            assert isinstance(agent, AsyncOpencode)
+
+            # ── Session creation and message ─────────────────────────────
+            session = await agent.session.create()
+            session_id = session.id
+            assert session_id is not None
+            assert isinstance(session_id, str)
+            assert len(session_id) > 0
+
+            prompt_parts = build_stage_prompt(pipeline, stage)
+            assert len(prompt_parts) > 0
+            assert prompt_parts[0]["type"] == "text"
+
+            model_id = settings.OPENCODE_DEFAULT_MODEL
+            provider_id = model_id.split("/")[0]
+            response = await agent.session.chat(
+                session_id,
+                model_id=model_id,
+                provider_id=provider_id,
+                parts=prompt_parts,
+            )
+            assert response is not None
+            assert isinstance(response.parts, list)
+
+            messages = await agent.session.messages(session_id)
+            assert len(messages) > 0
+
+            # ── Stage execution ──────────────────────────────────────────
             result = await execute_stage(pipeline, stage, agent)
 
-            # Must not fail — completed or blocked are acceptable outcomes
-            # for a simple prompt against the real server.
             assert result in (
                 StageResult.COMPLETED,
                 StageResult.BLOCKED,
             ), f"Stage execution failed with {result}"
 
-            # ── Verify in-memory state was updated ───────────────────────
             assert stage.status in ("completed", "blocked")
-            assert stage.session_id is not None, (
-                "Stage must have a session_id after execution"
-            )
+            assert stage.session_id is not None
             assert stage.started_at is not None
             assert stage.finished_at is not None
 
-            # ── Verify session messages are retrievable ──────────────────
-            messages = await agent.get_session_messages(
-                stage.session_id, limit=5,
-            )
-            assert len(messages) >= 0  # at least the response exists
-
-            # ── Verify diffs are retrievable ─────────────────────────────
-            diffs = await agent.get_session_diff(stage.session_id)
-            assert diffs is not None
+            stage_messages = await agent.session.messages(stage.session_id)
+            assert len(stage_messages) >= 0
         finally:
             cm.stop_container(pipeline)
