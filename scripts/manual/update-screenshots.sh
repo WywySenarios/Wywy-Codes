@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # HUMAN-ONLY — regenerates Playwright screenshot baselines.
-# Usage: bash scripts/update-screenshots.sh
+# Usage: bash scripts/manual/update-screenshots.sh
 
 set -euo pipefail
 
