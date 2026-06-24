@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 import docker
+import httpx
 from django.conf import settings
 from opencode_ai import AsyncOpencode
 
@@ -138,7 +139,13 @@ class ContainerManager:
                     f"Container {container_id} did not become healthy "
                     f"within {timeout}s"
                 )
-            resp = await agent._client.get("/global/health")
+            try:
+                resp = await agent._client.get("/global/health")
+            except httpx.RequestError:
+                # Server may still be starting up (port not yet bound).
+                # Retry after a short delay.
+                await asyncio.sleep(1)
+                continue
             healthy = resp.status_code == 200
             if healthy:
                 # Server is running — optionally warm up the model so
