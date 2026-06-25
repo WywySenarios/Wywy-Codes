@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { tailLog, type LogEntry } from "../../lib/api";
 
-export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: string }) {
-  const [entries, setEntries] = useState<LogEntry[]>([]);
+export function LogViewer({
+  pipelineId,
+  stage,
+  entries: prefetchedEntries,
+}: {
+  pipelineId?: string;
+  stage?: string;
+  entries?: LogEntry[];
+}) {
+  const isStatic = prefetchedEntries !== undefined;
+  const [entries, setEntries] = useState<LogEntry[]>(prefetchedEntries ?? []);
   const [raw, setRaw] = useState(false);
   const [follow, setFollow] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -13,12 +22,21 @@ export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: st
     }
   }, []);
 
+  // Sync when prefetched entries change (e.g. SPA data loads after mount).
   useEffect(() => {
+    if (prefetchedEntries !== undefined) {
+      setEntries(prefetchedEntries);
+    }
+  }, [prefetchedEntries]);
+
+  useEffect(() => {
+    if (isStatic) return;
+
     let cancelled = false;
 
     async function poll() {
       try {
-        const newEntries = await tailLog(pipelineId, stage);
+        const newEntries = await tailLog(pipelineId!, stage!);
         if (!cancelled) setEntries(newEntries);
       } catch { /* ignore */ }
     }
@@ -26,7 +44,7 @@ export function LogViewer({ pipelineId, stage }: { pipelineId: string; stage: st
     poll();
     const interval = setInterval(poll, 2000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [pipelineId, stage]);
+  }, [pipelineId, stage, isStatic]);
 
   useEffect(() => {
     if (follow) scrollToBottom();

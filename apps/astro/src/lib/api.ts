@@ -122,6 +122,36 @@ export async function getLogFileRaw(pipelineId: string, filename: string): Promi
   return res.text();
 }
 
+export interface SpaLogResponse {
+  system: LogEntry[];
+  django: LogEntry[];
+  pipeline?: {
+    files: string[];
+    entries: LogEntry[];
+  };
+}
+
+/** Fetch consolidated log data from the SPA endpoint. Calls GET /api/logs/spa/. */
+export async function getSpaLogs(pipelineId?: string, lines?: number): Promise<SpaLogResponse> {
+  let url = `${API_URL}/api/logs/spa/`;
+  const params = new URLSearchParams();
+  if (pipelineId !== undefined) params.set("pipeline_id", pipelineId);
+  if (lines !== undefined) params.set("lines", String(lines));
+  const qs = params.toString();
+  if (qs) url += `?${qs}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+/** Fetch Django application log entries. Calls GET /api/logs/django/. */
+export async function getDjangoLogs(lines?: number): Promise<LogEntry[]> {
+  let url = `${API_URL}/api/logs/django/`;
+  if (lines !== undefined) url += `?lines=${lines}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  return data.entries || [];
+}
+
 export async function listFiles(pipelineId: string, verbose = false): Promise<FileListing> {
   const url = `${API_URL}/api/pipelines/${pipelineId}/files/${verbose ? "?verbose=1" : ""}`;
   const res = await fetch(url);
