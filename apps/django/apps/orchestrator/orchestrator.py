@@ -31,8 +31,10 @@ from apps.orchestrator.exceptions import (
     StageNotInOrderError,
 )
 from apps.orchestrator.models import Pipeline, PipelineStage
+from apps.orchestrator.state.logging import LEVEL_MAP
 
 logger = logging.getLogger(__name__)
+sys_logger = logging.getLogger("orchestrator")
 
 # Tracks pipelines whose workspace has been torn down.
 # Prevents _teardown_workspace from logging and acting multiple times
@@ -188,7 +190,7 @@ def _read_fifo_signals(fifo_fd: int) -> None:
 
 def orchestrator_loop() -> None:
     """Main orchestrator thread loop - manages pipeline lifecycle."""
-    logger.info("Orchestrator loop started")
+    sys_logger.info("Orchestrator loop started")
     _ensure_agent_network()
     _reap_orphaned_pipelines()
 
@@ -235,6 +237,13 @@ def orchestrator_loop() -> None:
                 _execute_pipeline(pipeline_to_start)
         except Exception:
             logger.exception("Orchestrator loop error")
+            target = pipeline_to_advance or pipeline_to_start
+            if target:
+                _write_orchestrator_log(
+                    target,
+                    "ERROR",
+                    "Orchestrator loop error — see django.log for traceback",
+                )
 
         # Non-blocking test hook: monkeypatched in tests to raise
         # ``BreakLoop`` and exit the ``while True``.  In production
@@ -252,19 +261,27 @@ def _ensure_agent_network() -> None:
     """Create the agent bridge network and connect the orchestrator container.
 
     Ensures that the agent Docker network exists, then connects the
-    orchestrator's own container (via ``socket.gethostname()``) to that
-    network so it can reach pipeline opencode server containers for health
-    checks and stage execution.
+    orchestrator's own container to that network so it can reach pipeline
+    opencode server containers for health checks and stage execution.
 
-    Docker's ``network.connect()`` is **not** idempotent — the Engine API
-    returns ``403 Forbidden`` when the endpoint already exists in the
-    network.  The broad ``except DockerException`` handler below catches
-    this case so a re-connect does not crash the orchestrator, but it does
-    produce a noisy ERROR-level traceback.
+    Three scenarios are handled:
 
-    Thread-safe (locked: GIL + the ``except DockerException`` handler
-    converts harmless re-connect races into a log line rather than a
-    crash).
+    * **Standard Docker** — ``socket.gethostname()`` returns the short
+      container ID (default Docker behaviour).  The container is resolved
+      and connected, or found already attached, without incident.
+    * **Non-standard hostname** — A custom hostname (e.g. ``lolipop``)
+      that does **not** match any Docker container identifier.  The
+      function falls back to matching by ``Config.Hostname`` on running
+      containers.  If no match is found the container is **not**
+      connected (it may already be on the network via an external
+      mechanism), but no error is raised.
+    * **Already attached** — ``network.connect()`` is idempotent-safe:
+      the Engine API returns ``403 Forbidden`` when the endpoint already
+      exists; this is caught and logged at ``DEBUG``.
+
+    Thread-safe.  Even if two workers raced to acquire the lock (defence
+    in depth), the handler converts a harmless duplicate connect into a
+    debug log line rather than a crash.
     """
     try:
         client = docker.from_env()
@@ -273,13 +290,105 @@ def _ensure_agent_network() -> None:
             network = client.networks.get(network_name)
         except docker.errors.NotFound:
             network = client.networks.create(network_name, driver="bridge")
-            logger.info("Created agent network: %s", network_name)
-        # Connect the orchestrator's own container so it can reach pipeline
-        # containers on the agent network.
-        container_id = socket.gethostname()
+            sys_logger.info("Created agent network: %s", network_name)
+
+        # ── Resolve the orchestrator container's Docker identifier ─────
+        container_id = _resolve_orchestrator_container_id(client, network)
+
+        if container_id is None:
+            # Fall back to socket.gethostname().  This preserves backward
+            # compatibility with standard Docker (where gethostname()
+            # returns the short container ID) and with existing tests that
+            # mock both docker.from_env() and gethostname().
+            container_id = socket.gethostname()
+
+        # ── Check if already connected ────────────────────────────────
+        # Use getattr for compatibility with mocked objects in tests.
+        attrs = getattr(network, "attrs", None) or {}
+        connected_containers = attrs.get("Containers", {})
+        if any(cid.startswith(container_id) for cid in connected_containers):
+            sys_logger.debug(
+                "Orchestrator container '%s' already connected to '%s'",
+                container_id,
+                network_name,
+            )
+            return
+
+        # ── Connect ───────────────────────────────────────────────────
         network.connect(container_id)
+        sys_logger.info(
+            "Connected orchestrator container '%s' to '%s'",
+            container_id,
+            network_name,
+        )
+
     except docker.errors.DockerException:
-        logger.exception("Failed to ensure agent network")
+        sys_logger.exception("Failed to ensure agent network")
+
+
+def _resolve_orchestrator_container_id(
+    client: docker.DockerClient,
+    network: docker.models.networks.Network,
+) -> str | None:
+    """Return the orchestrator's own Docker container ID, or ``None``.
+
+    Resolution order:
+
+    1. ``socket.gethostname()`` — In standard Docker this returns the
+       short container ID, which ``client.containers.get()`` accepts.
+
+    2. ``Config.Hostname`` match — If the system hostname was customised
+       after container start (e.g. by ``/etc/hostname`` or systemd), step
+       1 fails.  Iterate running containers looking for one whose
+       ``Config.Hostname`` (the short ID assigned by Docker at creation
+       time) matches ``socket.gethostname()``.
+
+    3. Network membership — As a last resort, check whether any container
+       on the agent network has a name that suggests it is the orchestrator
+       (contains ``"django"``).  This handles dev environments where the
+       container is connected by external tooling and hostname resolution
+       fails entirely.
+    """
+    candidate = socket.gethostname()
+
+    # 1 — Fast path: standard Docker.
+    #     Use hasattr to avoid AttributeError on mocked clients in tests.
+    if hasattr(client, "containers") and client.containers is not None:
+        try:
+            client.containers.get(candidate)
+            return candidate
+        except docker.errors.NotFound:
+            pass
+
+    # 2 — Match by Config.Hostname (short ID stored by Docker at
+    #     container creation, which survives hostname customisation).
+    if hasattr(client, "containers") and client.containers is not None:
+        try:
+            for container in client.containers.list():
+                hostname = container.attrs.get("Config", {}).get("Hostname")
+                if hostname == candidate:
+                    return container.id
+        except docker.errors.DockerException:
+            pass
+
+    # 3 — Last resort: inspect the agent network's endpoint list for a
+    #     container whose name suggests it is the orchestrator.
+    try:
+        net_attrs = getattr(network, "attrs", None) or {}
+        for cid, info in (net_attrs.get("Containers") or {}).items():
+            name = info.get("Name", "") or ""
+            if "django" in name.lower():
+                sys_logger.debug(
+                    "Resolved orchestrator container via network membership: "
+                    "%s (%s)",
+                    cid[:12],
+                    name,
+                )
+                return cid
+    except (docker.errors.DockerException, AttributeError):
+        pass
+
+    return None
 
 
 def _reap_orphaned_pipelines() -> None:
@@ -296,11 +405,11 @@ def _reap_orphaned_pipelines() -> None:
     except OperationalError:
         # Transient DB failures (mount/permissions) should not kill the
         # orchestrator thread loop.
-        logger.warning("Skipping orphan reaping due to transient DB error")
+        sys_logger.warning("Skipping orphan reaping due to transient DB error")
         return
     if not count:
         return
-    logger.warning("Reaping %d orphaned pipeline(s) from previous run", count)
+    sys_logger.warning("Reaping %d orphaned pipeline(s) from previous run", count)
     for pipeline in orphaned:
         _transition_pipeline_state(pipeline, "failed")
         pipeline.stages.filter(status="running").update(status="failed")
@@ -320,16 +429,10 @@ def _execute_pipeline(pipeline: Pipeline) -> None:
     the normal advancement guard in ``advance_pipeline`` never attempts
     to advance FROM init — the transition to RED is handled here inline.
     """
-    logger.info(
-        "Executing pipeline %s (%s)",
-        pipeline.id,
-        pipeline.invocation_name,
-    )
-
     _write_orchestrator_log(
         pipeline,
         "INFO",
-        "Pipeline execution started",
+        f"Pipeline execution started ({pipeline.invocation_name})",
     )
 
     try:
@@ -930,6 +1033,7 @@ def _complete_pipeline(pipeline: Pipeline) -> None:
     try:
         _create_pr(pipeline)
     except Exception:
+        _write_orchestrator_log(pipeline, "ERROR", "PR creation failed (unexpected error)")
         logger.exception("PR creation failed for pipeline %s", pipeline.id)
     _stop_opencode_server(pipeline)
     _teardown_workspace(pipeline)
@@ -1174,8 +1278,6 @@ def _spawn_agent_container(pipeline: Pipeline, stage: PipelineStage) -> tuple[in
     return _run_stage_via_server(pipeline, stage)
 
 
-
-
 def _check_blocked_state(pipeline: Pipeline, stage: PipelineStage) -> bool:
     """Check state.json to determine if the stage is blocked on user input."""
     state = _read_state_field(pipeline, "stages")
@@ -1284,7 +1386,9 @@ def _stop_opencode_server(pipeline: Pipeline) -> None:
     try:
         container.remove(force=True)
     except docker.errors.DockerException:
-        logger.warning("Failed to remove server container for pipeline %s", pipeline.id)
+        _write_orchestrator_log(
+            pipeline, "WARN", "Failed to remove server container",
+        )
     _write_orchestrator_log(pipeline, "INFO", "Opencode server container stopped")
 
 
@@ -1315,7 +1419,9 @@ def _write_log_file(pipeline: Pipeline, filename: str, content: str) -> None:
             if not content.endswith("\n"):
                 f.write("\n")
     except Exception:
-        logger.warning("Failed to write log %s for pipeline %s", filename, pipeline.id)
+        _write_orchestrator_log(
+            pipeline, "WARN", f"Failed to write log file {filename}",
+        )
 
 
 def _capture_server_logs(pipeline: Pipeline, container: Container) -> None:
@@ -1323,7 +1429,9 @@ def _capture_server_logs(pipeline: Pipeline, container: Container) -> None:
     try:
         raw = container.logs(stdout=True, stderr=True).decode("utf-8", errors="replace")
     except Exception:
-        logger.warning("Failed to retrieve server logs for pipeline %s", pipeline.id)
+        _write_orchestrator_log(
+            pipeline, "WARN", "Failed to retrieve server logs",
+        )
         return
     _write_log_file(pipeline, "server.log", raw)
 
@@ -1381,7 +1489,10 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
         messages = _opencode_get(pipeline, f"/session/{session_id}/message")
         _write_log_file(pipeline, f"{stage.name}.log", json.dumps(messages, indent=2))
     except Exception:
-        logger.warning("Failed to capture session messages for stage %s", stage.name)
+        _write_orchestrator_log(
+            pipeline, "WARN",
+            f"Failed to capture session messages for stage {stage.name}",
+        )
 
     return exit_code, is_blocked
 
@@ -1404,7 +1515,10 @@ def _run_formatters(pipeline: Pipeline) -> None:
                 capture_output=True, timeout=120,
             )
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.warning("ruff formatter failed for %s", repo["name"])
+            _write_orchestrator_log(
+                pipeline, "WARN",
+                f"ruff formatter failed for {repo['name']}",
+            )
 
         try:
             subprocess.run(
@@ -1412,15 +1526,22 @@ def _run_formatters(pipeline: Pipeline) -> None:
                 capture_output=True, timeout=120, shell=True,
             )
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.warning("prettier formatter failed for %s", repo["name"])
+            _write_orchestrator_log(
+                pipeline, "WARN",
+                f"prettier formatter failed for {repo['name']}",
+            )
 
         try:
             subprocess.run(
-                ["clang-format", "-i", f"{repo_path}/**/*.{{c,h}}"],
+                ["clang-format", "-i", "--style=file",
+                 f"{repo_path}/**/*.{{c,cpp,h,hpp}}"],
                 capture_output=True, timeout=120, shell=True,
             )
         except (subprocess.SubprocessError, FileNotFoundError):
-            logger.warning("clang-format formatter failed for %s", repo["name"])
+            _write_orchestrator_log(
+                pipeline, "WARN",
+                f"clang-format formatter failed for {repo['name']}",
+            )
 
 
 def _create_pr(pipeline: Pipeline) -> None:
@@ -1431,12 +1552,16 @@ def _create_pr(pipeline: Pipeline) -> None:
         payload = pr_writer_stage.output
 
     if not payload:
-        logger.warning("No PR payload found for pipeline %s", pipeline.id)
+        _write_orchestrator_log(
+            pipeline, "WARN", "No PR payload found — skipping PR creation",
+        )
         return
 
     token = _read_github_token()
     if not token:
-        logger.error("GitHub token not found, cannot create PR")
+        _write_orchestrator_log(
+            pipeline, "ERROR", "GitHub token not found — cannot create PR",
+        )
         return
 
     repo_name = payload.get("repo", "Wywy-Website")
@@ -1564,24 +1689,25 @@ def abort_pipeline(pipeline: Pipeline) -> None:
 
 
 def _write_orchestrator_log(pipeline: Pipeline, level: str, msg: str, ctx: Optional[dict] = None) -> None:
-    """Write a structured log entry for the orchestrator."""
-    log_dir = Path(settings.LOG_ROOT) / str(pipeline.id)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "orchestrator.log"
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "level": level,
-        "pipeline": str(pipeline.id),
+    """Write a structured log entry through the ``orchestrator.pipeline`` logger.
+
+    Delegates to the stdlib logging system so that all orchestrator
+    log entries are subject to Django's ``LOGGING`` configuration
+    (rotation, persistence to disk, console output, etc.).
+
+    The legacy ``level`` parameter accepts both Python-style level names
+    (``"WARNING"``) and the abbreviated form (``"WARN"``) used by existing
+    call sites.  Both map to ``logging.WARNING``.
+    """
+    log = logging.getLogger("orchestrator.pipeline")
+    levelno = LEVEL_MAP.get(level.upper(), logging.INFO)
+
+    extra: dict[str, object] = {
+        "pipeline_id": str(pipeline.id),
         "stage": pipeline.current_stage or "-",
         "src": "orchestrator",
-        "msg": msg,
-        "ctx": ctx or {},
     }
-    try:
-        with open(log_file, "a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except Exception:
-        logger.warning(
-            "Failed to write orchestrator log entry for pipeline %s",
-            pipeline.id,
-        )
+    if ctx is not None:
+        extra["ctx"] = ctx
+
+    log.log(levelno, msg, extra=extra)
