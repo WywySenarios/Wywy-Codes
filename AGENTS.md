@@ -51,7 +51,28 @@ External deployment config is loaded from `/etc/Wywy-Website-Control/config/agen
 
 ## Running tests
 
-Run the full test suite (including integration tests against a real opencode server container) from any working directory:
+### Dedicated test scripts
+
+Two scripts live in ``scripts/tests/`` (within the ``scripts/**`` allowlist, so
+any agent shell can invoke them):
+
+| Script | What it runs | When to use |
+|--------|-------------|-------------|
+| ``scripts/tests/django.sh`` | ``docker compose run --rm django`` — runs ``pytest`` against all backend tests | Quick backend checks, CI, local dev |
+| ``scripts/tests/frontend.sh`` | ``docker compose run --rm astro`` — runs vitest unit + playwright E2E | Frontend-only changes |
+
+Both scripts load the same compose files and env files as the full suite below.
+Example:
+
+```bash
+scripts/tests/django.sh
+scripts/tests/frontend.sh
+```
+
+### Full suite (includes integration tests)
+
+Run the full test suite (including integration tests against a real opencode
+server container) from any working directory:
 
 ```bash
 /etc/Wywy-Website-Control/run.sh agentic test up
