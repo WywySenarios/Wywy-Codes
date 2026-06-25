@@ -375,17 +375,59 @@ def _parse_log_entries(content: str, max_lines: int) -> list[dict]:
     return entries[-max_lines:]
 
 
+# ═══════════════════════════════════════════════════════════════════════
+#  Log-reading helpers (shared by multiple log endpoints below)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _read_log_file_entries(filepath: Path, max_lines: int) -> list[dict]:
+    """Read a single log file and return parsed entries.
+
+    Delegates to ``_parse_log_entries`` for the actual parsing (JSON-lines
+    and JSON-array formats).  Returns an empty list when the file does not
+    exist or cannot be read.
+
+    Args:
+        filepath: Absolute path to the log file.
+        max_lines: Maximum number of entries to return from this file.
+
+    Returns:
+        Parsed log entries (newest up to *max_lines*).
+    """
+    try:
+        content = filepath.read_text()
+    except (FileNotFoundError, OSError):
+        return []
+    return _parse_log_entries(content, max_lines)
+
+
+def _pipeline_log_files(log_root: Path, pipeline_id: str) -> list[Path]:
+    """Return sorted paths to all ``*.log`` files in the pipeline log directory.
+
+    Excludes hidden files (starting with ``.``) to match the convention
+    in ``api_log_files``.
+    """
+    pipeline_dir = log_root / str(pipeline_id)
+    if not pipeline_dir.exists():
+        return []
+    return sorted(
+        f for f in pipeline_dir.iterdir()
+        if f.is_file() and f.name.endswith(".log") and not f.name.startswith(".")
+    )
+
+
+def _ts_key(entry: dict) -> str:
+    """Sort key for log entries — sort by timestamp (empty ts sorts first)."""
+    return entry.get("ts", "")
+
+
 def api_log_files(request: HttpRequest, pipeline_id: str) -> HttpResponse:
     """List available log files for a pipeline."""
     if request.method != "GET":
         return JsonResponse({"error": "Method not allowed"}, status=405)
     _ = get_object_or_404(Pipeline, pk=pipeline_id)
-    log_dir = Path(settings.LOG_ROOT) / str(pipeline_id)
-    files: list[str] = []
-    if log_dir.exists():
-        for f in sorted(log_dir.iterdir()):
-            if f.is_file() and f.name.endswith(".log") and not f.name.startswith("."):
-                files.append(f.name)
+    log_root = Path(settings.LOG_ROOT)
+    files = sorted(f.name for f in _pipeline_log_files(log_root, pipeline_id))
     return JsonResponse({"logs": files})
 
 
@@ -461,23 +503,148 @@ def api_stage_logs(request: HttpRequest, pipeline_id: str, stage_name: str) -> H
             for part in item.parts:
                 entries.append(part_to_log_entry(part))
     else:
-        stage_log_path = log_dir / f"{stage_name}.log"
-        if log_dir.exists() and stage_log_path.exists():
-            content = stage_log_path.read_text()
-            entries.extend(_parse_log_entries(content, max_lines))
+        stage_log = log_dir / f"{stage_name}.log"
+        entries.extend(_read_log_file_entries(stage_log, max_lines))
 
     # ── 2. Merge orchestrator.log entries ─────────────────────────────
-    orch_log_path = log_dir / "orchestrator.log"
-    if log_dir.exists() and orch_log_path.exists():
-        content = orch_log_path.read_text()
-        for entry in _parse_log_entries(content, max_lines):
-            entry.setdefault("type", "orchestrator")
-            entries.append(entry)
+    orch_log = log_dir / "orchestrator.log"
+    for entry in _read_log_file_entries(orch_log, max_lines):
+        entry.setdefault("type", "orchestrator")
+        entries.append(entry)
 
     # ── 3. Sort by timestamp (empty ts sorts first) ───────────────────
-    entries.sort(key=lambda e: e.get("ts", ""))
+    entries.sort(key=_ts_key)
 
     # ── 4. Apply lines limit ──────────────────────────────────────────
     entries = entries[-max_lines:]
 
     return JsonResponse({"entries": entries})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Cycle 7: merged-all and system log endpoints
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def api_logs_all(request: HttpRequest, pipeline_id: str) -> HttpResponse:
+    """Return entries from ALL log files for a pipeline, merged and sorted.
+
+    Reads every ``*.log`` file in ``{LOG_ROOT}/{pipeline_id}/`` as well as
+    the shared system ``{LOG_ROOT}/orchestrator.log``, parses JSON-lines
+    and JSON-array formats, and returns a single timestamp-sorted list.
+
+    Supports ``?lines=N`` (default 100).
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    _ = get_object_or_404(Pipeline, pk=pipeline_id)
+
+    try:
+        max_lines = int(request.GET.get("lines", "100"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+
+    log_root = Path(settings.LOG_ROOT)
+    entries: list[dict] = []
+
+    # 1. All per-pipeline log files
+    for log_file in _pipeline_log_files(log_root, pipeline_id):
+        entries.extend(_read_log_file_entries(log_file, max_lines))
+
+    # 2. Shared system orchestrator.log (at LOG_ROOT root, not per-pipeline)
+    system_log = log_root / "orchestrator.log"
+    entries.extend(_read_log_file_entries(system_log, max_lines))
+
+    # 3. Sort by timestamp (entries without ts sort first)
+    entries.sort(key=_ts_key)
+
+    # 4. Apply global line limit
+    entries = entries[-max_lines:]
+
+    return JsonResponse({"entries": entries})
+
+
+def _single_file_log_view(request: HttpRequest, filename: str) -> HttpResponse:
+    """Shared helper for views that read a single log file at LOG_ROOT."""
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    try:
+        max_lines = int(request.GET.get("lines", "100"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+
+    log_file = Path(settings.LOG_ROOT) / filename
+    entries = _read_log_file_entries(log_file, max_lines)
+
+    return JsonResponse({"entries": entries})
+
+
+def api_system_logs(request: HttpRequest) -> HttpResponse:
+    """Return entries from the shared system-level orchestrator log.
+
+    Reads ``{LOG_ROOT}/orchestrator.log``, which is written by the
+    ``orchestrator`` logger (startup, agent network, orphan reaping,
+    etc.).
+
+    Supports ``?lines=N`` (default 100).
+    """
+    return _single_file_log_view(request, "orchestrator.log")
+
+
+def api_django_logs(request: HttpRequest) -> HttpResponse:
+    """Return entries from the Django application log.
+
+    Reads ``{LOG_ROOT}/django.log``, which is written by the root logger's
+    ``RotatingFileHandler`` (Django-level errors, tracebacks, etc.).
+
+    Supports ``?lines=N`` (default 100).
+    """
+    return _single_file_log_view(request, "django.log")
+
+
+def api_logs_spa(request: HttpRequest) -> HttpResponse:
+    """Return consolidated log data for the SPA in a single response.
+
+    Always includes system orchestrator log and Django log entries.
+    When ``?pipeline_id=`` is provided, also includes per-pipeline log
+    files and merged entries.
+
+    Query parameters:
+        pipeline_id (str, optional): UUID of a pipeline to scope logs to.
+        lines (int, optional): Max entries per log source (default 100).
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+
+    try:
+        max_lines = int(request.GET.get("lines", "100"))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
+
+    log_root = Path(settings.LOG_ROOT)
+
+    # Always include system orchestrator log and django log entries
+    system_entries = _read_log_file_entries(log_root / "orchestrator.log", max_lines)
+    django_entries = _read_log_file_entries(log_root / "django.log", max_lines)
+
+    result: dict = {
+        "system": system_entries,
+        "django": django_entries,
+    }
+
+    pipeline_id = request.GET.get("pipeline_id")
+    if pipeline_id:
+        _ = get_object_or_404(Pipeline, pk=pipeline_id)
+        log_files = _pipeline_log_files(log_root, pipeline_id)
+        merged_entries: list[dict] = []
+        for log_file in log_files:
+            merged_entries.extend(_read_log_file_entries(log_file, max_lines))
+        merged_entries.sort(key=_ts_key)
+        result["pipeline"] = {
+            "files": sorted(f.name for f in log_files),
+            "entries": merged_entries,
+        }
+
+    return JsonResponse(result)

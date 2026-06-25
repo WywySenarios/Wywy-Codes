@@ -12,6 +12,37 @@ import json
 from pathlib import Path
 
 
+# ── Shared log-file creation helpers ──────────────────────────────────── #
+
+
+def create_pipeline_log(
+    log_root: Path, pipeline_id: str, filename: str,
+    entries: list[dict] | None = None,
+) -> Path:
+    """Create a log file in a pipeline's log directory.
+
+    If *entries* is ``None``, creates an empty file (useful for listing tests
+    that only need the file to exist).
+    """
+    log_dir = log_root / str(pipeline_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / filename
+    if entries is not None:
+        lines = "\n".join(json.dumps(e) for e in entries) + "\n"
+        log_file.write_text(lines)
+    else:
+        log_file.touch()
+    return log_file
+
+
+def create_log_file(log_root: Path, filename: str, entries: list[dict]) -> Path:
+    """Write *entries* as JSON Lines to a file at *log_root* root."""
+    log_file = log_root / filename
+    lines = "\n".join(json.dumps(e) for e in entries) + "\n"
+    log_file.write_text(lines)
+    return log_file
+
+
 class TestLogFilesList:
     """GET /api/pipelines/<id>/logs/ — list available log filenames."""
 
@@ -20,33 +51,14 @@ class TestLogFilesList:
         return f"/api/pipelines/{pipeline.id}/logs/"
 
     # ------------------------------------------------------------------ #
-    #  Helpers
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def create_log_file(
-        log_root: Path, pipeline_id: str, filename: str,
-        entries: list[dict] | None = None,
-    ) -> Path:
-        log_dir = log_root / str(pipeline_id)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / filename
-        if entries is not None:
-            lines = "\n".join(json.dumps(e) for e in entries) + "\n"
-            log_file.write_text(lines)
-        else:
-            log_file.touch()
-        return log_file
-
-    # ------------------------------------------------------------------ #
     #  Tests – list
     # ------------------------------------------------------------------ #
 
     def test_list_returns_available_filenames(
         self, client, db, pipeline_queued, temp_log_root,
     ):
-        self.create_log_file(temp_log_root, pipeline_queued.id, "orchestrator.log")
-        self.create_log_file(temp_log_root, pipeline_queued.id, "RED.log")
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log")
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "RED.log")
 
         response = client.get(self.url(pipeline_queued))
         assert response.status_code == 200
@@ -64,8 +76,8 @@ class TestLogFilesList:
     def test_list_excludes_dotfiles(
         self, client, db, pipeline_queued, temp_log_root,
     ):
-        self.create_log_file(temp_log_root, pipeline_queued.id, "orchestrator.log")
-        self.create_log_file(temp_log_root, pipeline_queued.id, ".hidden.log")
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log")
+        create_pipeline_log(temp_log_root, pipeline_queued.id, ".hidden.log")
 
         response = client.get(self.url(pipeline_queued))
         data = response.json()
@@ -94,18 +106,6 @@ class TestLogFilesEntries:
     def url(pipeline, filename: str) -> str:
         return f"/api/pipelines/{pipeline.id}/logs/entries/{filename}/"
 
-    @staticmethod
-    def create_log_file(
-        log_root: Path, pipeline_id: str, filename: str,
-        entries: list[dict],
-    ) -> Path:
-        log_dir = log_root / str(pipeline_id)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / filename
-        lines = "\n".join(json.dumps(e) for e in entries) + "\n"
-        log_file.write_text(lines)
-        return log_file
-
     # ------------------------------------------------------------------ #
     #  Tests – entries
     # ------------------------------------------------------------------ #
@@ -117,7 +117,7 @@ class TestLogFilesEntries:
             {"ts": "2026-01-01T00:00:00.000Z", "level": "INFO", "msg": "start"},
             {"ts": "2026-01-01T00:00:01.000Z", "level": "ERROR", "msg": "fail"},
         ]
-        self.create_log_file(temp_log_root, pipeline_queued.id, "orchestrator.log", entries)
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log", entries)
 
         response = client.get(self.url(pipeline_queued, "orchestrator.log"))
         assert response.status_code == 200
@@ -130,8 +130,8 @@ class TestLogFilesEntries:
         self, client, db, pipeline_queued, temp_log_root,
     ):
         """Only the requested file's entries are returned, no merging."""
-        self.create_log_file(temp_log_root, pipeline_queued.id, "RED.log", [{"msg": "from stage"}])
-        self.create_log_file(
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "RED.log", [{"msg": "from stage"}])
+        create_pipeline_log(
             temp_log_root, pipeline_queued.id, "orchestrator.log", [{"msg": "from orch"}],
         )
 
@@ -190,7 +190,7 @@ class TestLogFilesEntries:
         self, client, db, pipeline_queued, temp_log_root,
     ):
         entries = [{"msg": f"line{i}"} for i in range(10)]
-        self.create_log_file(temp_log_root, pipeline_queued.id, "orchestrator.log", entries)
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log", entries)
 
         response = client.get(f"{self.url(pipeline_queued, 'orchestrator.log')}?lines=3")
         result = response.json()["entries"]
@@ -280,4 +280,394 @@ class TestLogFilesRaw:
         response = client.post(
             f"/api/pipelines/{pipeline_queued.id}/logs/entries/orchestrator.log/?raw",
         )
+        assert response.status_code == 405
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GET /api/pipelines/<uuid:id>/logs/all/
+#  Returns entries from ALL log files merged and sorted by timestamp,
+#  including per-pipeline files (stage logs, orchestrator.log) and the
+#  shared system-level orchestrator.log at the LOG_ROOT root.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestLogsAll:
+    """GET /api/pipelines/<id>/logs/all/ — all log entries merged for a pipeline."""
+
+    @staticmethod
+    def url(pipeline_id: str) -> str:
+        return f"/api/pipelines/{pipeline_id}/logs/all/"
+
+    # ------------------------------------------------------------------ #
+    #  Tests – all
+    # ------------------------------------------------------------------ #
+
+    def test_merges_multiple_log_files_sorted_by_timestamp(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """Entries from RED.log, orchestrator.log, and the shared system
+        orchestrator.log are merged into a single sorted list."""
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "RED.log", [
+            {"ts": "2026-01-01T00:00:02Z", "msg": "from RED"},
+        ])
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log", [
+            {"ts": "2026-01-01T00:00:01Z", "msg": "from orch"},
+        ])
+        create_log_file(temp_log_root, "orchestrator.log", [
+            {"ts": "2026-01-01T00:00:03Z", "msg": "from system"},
+        ])
+
+        response = client.get(self.url(pipeline_queued.id))
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+        assert len(entries) == 3
+        # Assert sorted by ts ascending
+        assert entries[0]["msg"] == "from orch"
+        assert entries[1]["msg"] == "from RED"
+        assert entries[2]["msg"] == "from system"
+
+    def test_respects_lines_parameter(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """``?lines=N`` returns only the last N entries across all merged files."""
+        entries = [{"ts": f"2026-01-01T00:00:{i:02d}Z", "msg": f"msg{i}"} for i in range(10)]
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log", entries)
+
+        response = client.get(f"{self.url(pipeline_queued.id)}?lines=3")
+        result = response.json()["entries"]
+        assert len(result) == 3
+        assert result[0]["msg"] == "msg7"
+        assert result[2]["msg"] == "msg9"
+
+    def test_empty_when_no_log_files(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        response = client.get(self.url(pipeline_queued.id))
+        assert response.status_code == 200
+        assert response.json()["entries"] == []
+
+    def test_skips_invalid_json_lines_in_individual_files(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """Invalid JSON lines in a file are skipped during merge."""
+        log_dir = temp_log_root / str(pipeline_queued.id)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "RED.log").write_text(
+            '{"ts":"t1","msg":"valid"}\n'
+            "not valid json\n"
+            '{"ts":"t2","msg":"also valid"}\n'
+        )
+        response = client.get(self.url(pipeline_queued.id))
+        entries = response.json()["entries"]
+        assert len(entries) == 2
+        assert entries[0]["msg"] == "valid"
+
+    def test_handles_json_array_files(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """Pretty-printed JSON array files (stage logs) are parsed correctly."""
+        log_dir = temp_log_root / str(pipeline_queued.id)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "GREEN.log").write_text(
+            json.dumps([
+                {"ts": "2026-01-01T00:00:00Z", "msg": "first"},
+                {"ts": "2026-01-01T00:00:01Z", "msg": "second"},
+            ], indent=2)
+        )
+        response = client.get(self.url(pipeline_queued.id))
+        entries = response.json()["entries"]
+        assert len(entries) == 2
+        assert entries[0]["msg"] == "first"
+        assert entries[1]["msg"] == "second"
+
+    def test_404_for_nonexistent_pipeline(
+        self, client, db, temp_log_root,
+    ):
+        response = client.get(
+            "/api/pipelines/00000000-0000-0000-0000-000000000000/logs/all/",
+        )
+        assert response.status_code == 404
+
+    def test_rejects_non_get_methods(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        response = client.post(self.url(pipeline_queued.id))
+        assert response.status_code == 405
+
+    def test_put_rejected(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        response = client.put(self.url(pipeline_queued.id))
+        assert response.status_code == 405
+
+    def test_delete_rejected(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        response = client.delete(self.url(pipeline_queued.id))
+        assert response.status_code == 405
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GET /api/logs/system/
+#  Returns entries from the shared system-level orchestrator.log at
+#  LOG_ROOT, written by the ``orchestrator`` logger (startup, agent
+#  network, orphan reaping, etc.).
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestSystemLogs:
+    """GET /api/logs/system/ — system-level orchestrator log entries."""
+
+    @staticmethod
+    def url() -> str:
+        return "/api/logs/system/"
+
+    # ------------------------------------------------------------------ #
+    #  Tests – system
+    # ------------------------------------------------------------------ #
+
+    def test_returns_system_log_entries(
+        self, client, db, temp_log_root,
+    ):
+        """Returns entries from {LOG_ROOT}/orchestrator.log."""
+        create_log_file(temp_log_root, "orchestrator.log", [
+            {"ts": "2026-01-01T00:00:00Z", "msg": "Orchestrator started"},
+        ])
+        response = client.get(self.url())
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+        assert len(entries) == 1
+        assert entries[0]["msg"] == "Orchestrator started"
+
+    def test_respects_lines_parameter(
+        self, client, db, temp_log_root,
+    ):
+        entries = [{"msg": f"line{i}"} for i in range(10)]
+        create_log_file(temp_log_root, "orchestrator.log", entries)
+
+        response = client.get(f"{self.url()}?lines=3")
+        result = response.json()["entries"]
+        assert len(result) == 3
+        assert result[0]["msg"] == "line7"
+        assert result[2]["msg"] == "line9"
+
+    def test_empty_when_no_system_log(
+        self, client, db, temp_log_root,
+    ):
+        """Return empty array when {LOG_ROOT}/orchestrator.log does not exist."""
+        response = client.get(self.url())
+        assert response.status_code == 200
+        assert response.json()["entries"] == []
+
+    def test_rejects_non_get_methods(
+        self, client, db, temp_log_root,
+    ):
+        response = client.post(self.url())
+        assert response.status_code == 405
+
+    def test_put_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.put(self.url())
+        assert response.status_code == 405
+
+    def test_delete_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.delete(self.url())
+        assert response.status_code == 405
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GET /api/logs/django/
+#  Returns entries from the Django application log (django.log) at
+#  LOG_ROOT, written by the root logger's RotatingFileHandler
+#  (Django-level errors, tracebacks).
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestDjangoLogs:
+    """GET /api/logs/django/ — Django application log entries."""
+
+    @staticmethod
+    def url() -> str:
+        return "/api/logs/django/"
+
+    # ------------------------------------------------------------------ #
+    #  Tests – django
+    # ------------------------------------------------------------------ #
+
+    def test_returns_django_log_entries(
+        self, client, db, temp_log_root,
+    ):
+        """Returns entries from {LOG_ROOT}/django.log."""
+        create_log_file(temp_log_root, "django.log", [
+            {"ts": "2026-01-01T00:00:00Z", "msg": "Database error"},
+        ])
+        response = client.get(self.url())
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+        assert len(entries) == 1
+        assert entries[0]["msg"] == "Database error"
+
+    def test_respects_lines_parameter(
+        self, client, db, temp_log_root,
+    ):
+        entries = [{"msg": f"line{i}"} for i in range(10)]
+        create_log_file(temp_log_root, "django.log", entries)
+
+        response = client.get(f"{self.url()}?lines=3")
+        result = response.json()["entries"]
+        assert len(result) == 3
+        assert result[0]["msg"] == "line7"
+        assert result[2]["msg"] == "line9"
+
+    def test_empty_when_no_django_log(
+        self, client, db, temp_log_root,
+    ):
+        """Return empty array when {LOG_ROOT}/django.log does not exist."""
+        response = client.get(self.url())
+        assert response.status_code == 200
+        assert response.json()["entries"] == []
+
+    def test_rejects_non_get_methods(
+        self, client, db, temp_log_root,
+    ):
+        response = client.post(self.url())
+        assert response.status_code == 405
+
+    def test_put_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.put(self.url())
+        assert response.status_code == 405
+
+    def test_delete_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.delete(self.url())
+        assert response.status_code == 405
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  GET /api/logs/spa/
+#  Consolidated endpoint for the SPA frontend.  Always returns system
+#  orchestrator.log and django.log entries.  When ?pipeline_id=UUID is
+#  provided, also returns per-pipeline log files and merged entries.
+#
+#  Supports ?lines=N (default 100).
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestLogsSpa:
+    """GET /api/logs/spa/ — consolidated log data for the SPA."""
+
+    @staticmethod
+    def url() -> str:
+        return "/api/logs/spa/"
+
+    # ------------------------------------------------------------------ #
+    #  Tests – spa
+    # ------------------------------------------------------------------ #
+
+    def test_returns_system_and_django_when_no_pipeline_id(
+        self, client, db, temp_log_root,
+    ):
+        """Without pipeline_id, returns only system and django log entries."""
+        create_log_file(temp_log_root, "orchestrator.log", [
+            {"ts": "t1", "msg": "system event"},
+        ])
+        create_log_file(temp_log_root, "django.log", [
+            {"ts": "t2", "msg": "django error"},
+        ])
+
+        response = client.get(self.url())
+        assert response.status_code == 200
+        data = response.json()
+        assert "system" in data
+        assert "django" in data
+        assert "pipeline" not in data
+        assert len(data["system"]) == 1
+        assert data["system"][0]["msg"] == "system event"
+        assert len(data["django"]) == 1
+        assert data["django"][0]["msg"] == "django error"
+
+    def test_returns_pipeline_data_when_pipeline_id_provided(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """With ?pipeline_id=, also returns pipeline files and merged entries."""
+        create_log_file(temp_log_root, "orchestrator.log", [
+            {"ts": "t1", "msg": "system event"},
+        ])
+        create_log_file(temp_log_root, "django.log", [
+            {"ts": "t2", "msg": "django error"},
+        ])
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "orchestrator.log", [
+            {"ts": "t3", "msg": "pipeline event"},
+        ])
+        create_pipeline_log(temp_log_root, pipeline_queued.id, "RED.log", [
+            {"ts": "t4", "msg": "stage event"},
+        ])
+
+        response = client.get(f"{self.url()}?pipeline_id={pipeline_queued.id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert "system" in data
+        assert "django" in data
+        assert "pipeline" in data
+        assert "files" in data["pipeline"]
+        assert "entries" in data["pipeline"]
+        assert sorted(data["pipeline"]["files"]) == ["RED.log", "orchestrator.log"]
+        assert len(data["pipeline"]["entries"]) == 2
+
+    def test_respects_lines_parameter(
+        self, client, db, temp_log_root,
+    ):
+        entries = [{"msg": f"line{i}"} for i in range(10)]
+        create_log_file(temp_log_root, "orchestrator.log", entries)
+        create_log_file(temp_log_root, "django.log", entries)
+
+        response = client.get(f"{self.url()}?lines=3")
+        data = response.json()
+        assert len(data["system"]) == 3
+        assert len(data["django"]) == 3
+
+    def test_404_for_nonexistent_pipeline_id(
+        self, client, db, temp_log_root,
+    ):
+        """An invalid (non-existent) pipeline_id returns 404."""
+        create_log_file(temp_log_root, "orchestrator.log", [
+            {"ts": "t1", "msg": "system"},
+        ])
+        response = client.get(
+            f"{self.url()}?pipeline_id=00000000-0000-0000-0000-000000000000"
+        )
+        assert response.status_code == 404
+
+    def test_empty_when_no_log_files(
+        self, client, db, temp_log_root,
+    ):
+        """Return empty arrays when no log files exist."""
+        response = client.get(self.url())
+        assert response.status_code == 200
+        data = response.json()
+        assert data["system"] == []
+        assert data["django"] == []
+
+    def test_rejects_non_get_methods(
+        self, client, db, temp_log_root,
+    ):
+        response = client.post(self.url())
+        assert response.status_code == 405
+
+    def test_put_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.put(self.url())
+        assert response.status_code == 405
+
+    def test_delete_rejected(
+        self, client, db, temp_log_root,
+    ):
+        response = client.delete(self.url())
         assert response.status_code == 405

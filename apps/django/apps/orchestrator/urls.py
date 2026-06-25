@@ -14,6 +14,10 @@ urlpatterns = [
     path("api/pipelines/<uuid:pipeline_id>/respond/", views.api_respond, name="api-respond"),
     path("api/pipelines/<uuid:pipeline_id>/abort/", views.api_abort, name="api-abort"),
     path("api/pipelines/<uuid:pipeline_id>/logs/", views.api_log_files, name="api-log-files"),
+    path("api/pipelines/<uuid:pipeline_id>/logs/all/", views.api_logs_all, name="api-logs-all"),
     path("api/pipelines/<uuid:pipeline_id>/logs/entries/<str:log_filename>/", views.api_log_entries, name="api-log-entries"),
     path("api/pipelines/<uuid:pipeline_id>/logs/<str:stage_name>/", views.api_stage_logs, name="api-stage-logs"),
+    path("api/logs/system/", views.api_system_logs, name="api-system-logs"),
+    path("api/logs/django/", views.api_django_logs, name="api-django-logs"),
+    path("api/logs/spa/", views.api_logs_spa, name="api-logs-spa"),
 ]
