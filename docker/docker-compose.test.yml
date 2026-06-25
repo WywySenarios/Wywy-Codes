@@ -30,7 +30,7 @@ services:
       - bash
       - -c
       - |
-        python -m pytest /app/apps/orchestrator/tests/ -v --tb=short 2>&1 \
+        python -m pytest /app/apps/orchestrator/ -v --tb=short 2>&1 \
           | tee /var/log/Wywy-Website/agentic/test-summary.log 2>/dev/null
         exit $${PIPESTATUS[0]}
   astro:
