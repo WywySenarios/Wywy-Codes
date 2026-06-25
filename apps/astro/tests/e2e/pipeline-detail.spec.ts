@@ -207,71 +207,84 @@ test.describe("Pipeline detail — log tab content per stage", () => {
       });
     });
 
+    // ── Mock consolidated SPA logs ─────────────────────────────────────
+    await page.route("**/api/logs/spa/**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ system: [], django: [] }),
+      });
+    });
+
     // ── Navigate and wait for initial render ────────────────────────────
     await page.goto("/_spa/?id=test-pipeline-id");
     await page.waitForLoadState("networkidle");
 
     // ── Verify all log tabs are rendered ────────────────────────────────
-    // The frontend derives log file names from pipeline stages via
-    // logFilesFromStages(): 1 orchestrator.log + 1 server.log + N stage .log files.
-    // MOCK_PIPELINE has 6 stages → 8 log tabs total.
+    // The frontend now prepends "System" and "Django" tabs from the SPA
+    // endpoint, then renders per-stage file tabs via logFilesFromStages():
+    // System + Django + orchestrator + server + 6 stages = 10 log tabs.
     const tabList = page.locator('[role="tablist"]');
     await expect(tabList).toBeVisible({ timeout: 10000 });
     const tabs = page.getByRole("tab");
-    await expect(tabs).toHaveCount(8);
+    await expect(tabs).toHaveCount(10);
 
-    // ── Tab labels ──────────────────────────────────────────────────────
-    await expect(tabs.nth(0)).toHaveText("orchestrator");
-    await expect(tabs.nth(1)).toHaveText("server");
-    await expect(tabs.nth(2)).toHaveText("init");
-    await expect(tabs.nth(3)).toHaveText("RED");
-    await expect(tabs.nth(4)).toHaveText("GREEN");
-    await expect(tabs.nth(5)).toHaveText("REFRACTOR");
-    await expect(tabs.nth(6)).toHaveText("compilance");
-    await expect(tabs.nth(7)).toHaveText("PR writer");
+    // ── Tab labels (System and Django are prepended) ────────────────────
+    await expect(tabs.nth(0)).toHaveText("System");
+    await expect(tabs.nth(1)).toHaveText("Django");
+    await expect(tabs.nth(2)).toHaveText("orchestrator");
+    await expect(tabs.nth(3)).toHaveText("server");
+    await expect(tabs.nth(4)).toHaveText("init");
+    await expect(tabs.nth(5)).toHaveText("RED");
+    await expect(tabs.nth(6)).toHaveText("GREEN");
+    await expect(tabs.nth(7)).toHaveText("REFRACTOR");
+    await expect(tabs.nth(8)).toHaveText("compilance");
+    await expect(tabs.nth(9)).toHaveText("PR writer");
 
-    // ── Tab 0: orchestrator (default-selected) ─────────────────────────
+    // ── Tab 2: orchestrator (click to make active) ──────────────────────
+    await tabs.nth(2).click();
+    await page.waitForTimeout(500);
     await expect(page.getByText("Orchestrator: pipeline created")).toBeVisible();
     await expect(page.getByText("Orchestrator: workspace initialised")).toBeVisible();
     await expect(page.getByText("Orchestrator: pipeline created")).toHaveCount(1);
 
-    // ── Tab 1: server (no mock entries) ─────────────────────────────────
-    await tabs.nth(1).click();
+    // ── Tab 3: server (no mock entries) ─────────────────────────────────
+    await tabs.nth(3).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("No log entries yet.")).toBeVisible();
 
-    // ── Tab 2: init ─────────────────────────────────────────────────────
-    await tabs.nth(2).click();
+    // ── Tab 4: init ─────────────────────────────────────────────────────
+    await tabs.nth(4).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("Init: preparing environment")).toBeVisible();
     await expect(page.getByText("Init: configuration loaded")).toBeVisible();
     await expect(page.getByText("Init: preparing environment")).toHaveCount(1);
 
-    // ── Tab 3: RED ──────────────────────────────────────────────────────
-    await tabs.nth(3).click();
+    // ── Tab 5: RED ──────────────────────────────────────────────────────
+    await tabs.nth(5).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("RED: writing failing test")).toBeVisible();
     await expect(page.getByText("RED: linter warning")).toBeVisible();
     await expect(page.getByText("RED: test suite failed")).toBeVisible();
 
-    // ── Tab 4: GREEN ────────────────────────────────────────────────────
-    await tabs.nth(4).click();
+    // ── Tab 6: GREEN ────────────────────────────────────────────────────
+    await tabs.nth(6).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("GREEN: making test pass")).toBeVisible();
     await expect(page.getByText("GREEN: all tests pass")).toBeVisible();
 
-    // ── Tab 5: REFRACTOR ────────────────────────────────────────────────
-    await tabs.nth(5).click();
+    // ── Tab 7: REFRACTOR ────────────────────────────────────────────────
+    await tabs.nth(7).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("REFRACTOR: cleaning up")).toBeVisible();
 
-    // ── Tab 6: compilance ───────────────────────────────────────────────
-    await tabs.nth(6).click();
+    // ── Tab 8: compilance ───────────────────────────────────────────────
+    await tabs.nth(8).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("compilance: checking standards")).toBeVisible();
 
-    // ── Tab 7: PR writer (empty log file) ───────────────────────────────
-    await tabs.nth(7).click();
+    // ── Tab 9: PR writer (empty log file) ───────────────────────────────
+    await tabs.nth(9).click();
     await page.waitForTimeout(500);
     await expect(page.getByText("No log entries yet.")).toBeVisible();
   });
@@ -348,15 +361,32 @@ test.describe("Pipeline detail — log tab content per stage", () => {
       });
     });
 
+    // ── Mock consolidated SPA logs ─────────────────────────────────────
+    await page.route("**/api/logs/spa/**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ system: [], django: [] }),
+      });
+    });
+
     await page.goto("/_spa/?id=test-pipeline-id");
     await page.waitForLoadState("networkidle");
 
     // ── Tablist MUST be present even with no stages ─────────────────────
+    // System and Django tabs are always prepended, plus the minimum
+    // orchestrator.log fallback → 3 tabs.
     const tabList = page.locator('[role="tablist"]');
     await expect(tabList).toBeVisible({ timeout: 10000 });
     const tabs = page.getByRole("tab");
-    await expect(tabs).toHaveCount(1);
-    await expect(tabs.nth(0)).toHaveText("orchestrator");
+    await expect(tabs).toHaveCount(3);
+    await expect(tabs.nth(0)).toHaveText("System");
+    await expect(tabs.nth(1)).toHaveText("Django");
+    await expect(tabs.nth(2)).toHaveText("orchestrator");
+
+    // ── Click orchestrator tab to make it active ────────────────────────
+    await tabs.nth(2).click();
+    await page.waitForTimeout(500);
 
     // ── Server logs (orchestrator.log) must be visible ─────────────────
     await expect(page.getByText("Orchestrator: pipeline created")).toBeVisible();
@@ -444,6 +474,15 @@ test.describe("Pipeline detail — init stage logs", () => {
       });
     });
 
+    // ── Mock consolidated SPA logs ─────────────────────────────────────
+    await page.route("**/api/logs/spa/**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ system: [], django: [] }),
+      });
+    });
+
     // ── Navigate and wait for initial render ────────────────────────────
     await page.goto("/_spa/?id=init-stage-pipeline");
     await page.waitForLoadState("networkidle");
@@ -452,20 +491,24 @@ test.describe("Pipeline detail — init stage logs", () => {
     const tabList = page.locator('[role="tablist"]');
     await expect(tabList).toBeVisible({ timeout: 10000 });
     const tabs = page.getByRole("tab");
-    // 6 stages → 8 log tabs (orchestrator + server + 6 stages)
-    await expect(tabs).toHaveCount(8);
+    // System + Django + 8 file tabs (orchestrator + server + 6 stages) = 10
+    await expect(tabs).toHaveCount(10);
 
-    // ── Tab labels ──────────────────────────────────────────────────────
-    await expect(tabs.nth(0)).toHaveText("orchestrator");
-    await expect(tabs.nth(1)).toHaveText("server");
-    await expect(tabs.nth(2)).toHaveText("init");
-    await expect(tabs.nth(3)).toHaveText("RED");
-    await expect(tabs.nth(4)).toHaveText("GREEN");
-    await expect(tabs.nth(5)).toHaveText("REFRACTOR");
-    await expect(tabs.nth(6)).toHaveText("compilance");
-    await expect(tabs.nth(7)).toHaveText("PR writer");
+    // ── Tab labels (System and Django are prepended) ────────────────────
+    await expect(tabs.nth(0)).toHaveText("System");
+    await expect(tabs.nth(1)).toHaveText("Django");
+    await expect(tabs.nth(2)).toHaveText("orchestrator");
+    await expect(tabs.nth(3)).toHaveText("server");
+    await expect(tabs.nth(4)).toHaveText("init");
+    await expect(tabs.nth(5)).toHaveText("RED");
+    await expect(tabs.nth(6)).toHaveText("GREEN");
+    await expect(tabs.nth(7)).toHaveText("REFRACTOR");
+    await expect(tabs.nth(8)).toHaveText("compilance");
+    await expect(tabs.nth(9)).toHaveText("PR writer");
 
-    // ── Default tab: orchestrator — verify UID entries ─────────────────
+    // ── Click orchestrator tab — verify UID entries ────────────────────
+    await tabs.nth(2).click();
+    await page.waitForTimeout(500);
     await expect(page.getByText("uid-orch-001: pipeline queued")).toBeVisible();
     await expect(page.getByText("uid-orch-002: pipeline execution started")).toBeVisible();
     await expect(page.getByText("uid-orch-003: workspace creation initiated")).toBeVisible();
@@ -474,7 +517,7 @@ test.describe("Pipeline detail — init stage logs", () => {
     await expect(page.getByText("uid-srv-001: opencode server container started")).not.toBeVisible();
 
     // ── Switch to server tab — verify UID entries ───────────────────────
-    await tabs.nth(1).click();
+    await tabs.nth(3).click();
     await page.waitForTimeout(500);
 
     await expect(page.getByText("uid-srv-001: opencode server container started")).toBeVisible();
@@ -485,7 +528,7 @@ test.describe("Pipeline detail — init stage logs", () => {
     await expect(page.getByText("uid-orch-001: pipeline queued")).not.toBeVisible();
 
     // ── Switch back to orchestrator tab — verify UIDs still present ────
-    await tabs.nth(0).click();
+    await tabs.nth(2).click();
     await page.waitForTimeout(500);
 
     await expect(page.getByText("uid-orch-001: pipeline queued")).toBeVisible();

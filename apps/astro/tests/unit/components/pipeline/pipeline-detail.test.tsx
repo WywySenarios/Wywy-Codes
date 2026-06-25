@@ -34,6 +34,7 @@ vi.mock("../../../../src/lib/api", () => ({
   getPipeline: vi.fn(() => Promise.resolve(mockPipeline)),
   abortPipeline: vi.fn(),
   tailLog: vi.fn(() => Promise.resolve([])),
+  getSpaLogs: vi.fn(() => Promise.resolve({ system: [], django: [], pipeline: { files: [], entries: [] } })),
 }));
 
 describe("PipelineDetail", () => {
@@ -70,6 +71,18 @@ describe("PipelineDetail", () => {
     const tabs = await screen.findAllByRole("tab");
     const tabNames = tabs.map((t) => t.textContent);
     expect(tabNames).toContain("server");
+  });
+
+  it("includes a System tab for consolidated orchestrator logs", async () => {
+    render(<PipelineDetail pipelineId="test-pipeline-id" />);
+
+    expect(await screen.findByRole("tab", { name: "System" })).toBeTruthy();
+  });
+
+  it("includes a Django tab for consolidated application logs", async () => {
+    render(<PipelineDetail pipelineId="test-pipeline-id" />);
+
+    expect(await screen.findByRole("tab", { name: "Django" })).toBeTruthy();
   });
 });
 
