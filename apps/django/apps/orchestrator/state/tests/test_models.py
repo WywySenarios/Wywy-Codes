@@ -142,7 +142,7 @@ class TestPipelineState:
         assert p.pipeline_id == "min-1"
         assert p.invocation_name == "minimal"
         assert p.status == "queued"
-        assert set(p.stages.keys()) == {"RED", "GREEN", "REFRACTOR", "compilance", "PR writer"}
+        assert set(p.stages.keys()) == set(EXPECTED_STAGE_NAMES)
         assert p.stages["RED"].status == "pending"
 
     def test_from_dict_full(self):
@@ -228,4 +228,4 @@ class TestConstants:
         assert set(TERMINAL_STATUSES) == expected
 
     def test_stage_order(self):
-        assert STAGE_NAMES == ("RED", "GREEN", "REFRACTOR", "compilance", "PR writer")
+        assert STAGE_NAMES == EXPECTED_STAGE_NAMES

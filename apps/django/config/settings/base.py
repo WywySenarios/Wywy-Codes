@@ -92,7 +92,15 @@ LOG_ROOT: str = environ.get(
     "/tmp/wywy-test-logs" if environ.get("ENVIRONMENT") == "test" else "/var/log/Wywy-Website/agentic",
 )
 
-_is_test = environ.get("ENVIRONMENT") == "test"
+# Ensure the log directory exists before the LOGGING config is processed.
+# RotatingFileHandler requires the parent directory to exist at setup time.
+Path(LOG_ROOT).mkdir(parents=True, exist_ok=True)
+
+# ── Logging configuration ──────────────────────────────────────────────
+# All orchestrator log entries flow through Python's stdlib logging.
+# The ``orchestrator.pipeline`` logger writes per-pipeline JSON-lines
+# files via ``PipelineFileHandler``, while the root logger handles
+# everything else (Django errors, HTTP requests, etc.).
 
 LOGGING: dict = {
     "version": 1,
@@ -108,21 +116,51 @@ LOGGING: dict = {
             "class": "logging.StreamHandler",
             "formatter": "json",
         },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": str(Path(LOG_ROOT) / "django.log"),
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 3,
+            "formatter": "json",
+        },
+        "pipeline_file": {
+            "level": "DEBUG",
+            "class": "apps.orchestrator.state.logging.PipelineFileHandler",
+        },
+    },
+    "loggers": {
+        # Dedicated logger for per-pipeline orchestrator log entries.
+        # Writes to {LOG_ROOT}/{pipeline_id}/orchestrator.log.
+        # Does NOT propagate to the root logger — these entries are
+        # persisted to their own files and do not need duplication
+        # in console or django.log.
+        "orchestrator.pipeline": {
+            "handlers": ["pipeline_file"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
+        # System-level orchestrator events that have no pipeline context
+        # (startup, agent network, orphan reaping, etc.).
+        # Writes to {LOG_ROOT}/orchestrator.log alongside per-pipeline dirs.
+        "orchestrator": {
+            "handlers": ["console", "orchestrator_file"],
+            "level": "DEBUG",
+            "propagate": False,
+        },
     },
     "root": {
-        "handlers": ["console"],
+        "handlers": ["console", "file"],
         "level": "INFO",
     },
 }
-if not _is_test:
-    LOGGING["handlers"]["file"] = {
-        "class": "logging.handlers.RotatingFileHandler",
-        "filename": str(Path(LOG_ROOT) / "django.log"),
-        "maxBytes": 10 * 1024 * 1024,
-        "backupCount": 3,
-        "formatter": "json",
-    }
-    LOGGING["root"]["handlers"].append("file")
+# Shared handler for system-level orchestrator events (no pipeline context).
+LOGGING["handlers"]["orchestrator_file"] = {
+    "class": "logging.handlers.RotatingFileHandler",
+    "filename": str(Path(LOG_ROOT) / "orchestrator.log"),
+    "maxBytes": 10 * 1024 * 1024,
+    "backupCount": 3,
+    "formatter": "json",
+}
 
 # Whitenoise / Astro static files
 ASTRO_DIST: str = environ.get(
