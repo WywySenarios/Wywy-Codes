@@ -31,7 +31,7 @@ STAGE_NAMES: tuple[str, ...] = (
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 )
 

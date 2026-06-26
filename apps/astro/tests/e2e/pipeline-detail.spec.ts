@@ -38,7 +38,7 @@ const MOCK_PIPELINE = {
     { id: 2, name: "RED", status: "running", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 3, name: "GREEN", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 4, name: "REFRACTOR", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
-    { id: 5, name: "compilance", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
+    { id: 5, name: "compliance", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 6, name: "PR writer", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
   ],
 };
@@ -95,9 +95,9 @@ const MOCK_ENTRIES_BY_FILE: Record<string, { entries: Array<Record<string, unkno
       { ts: "2026-01-01T00:00:08.000Z", level: "INFO", msg: "REFRACTOR: cleaning up", pipeline: "test-pipeline-id", stage: "REFRACTOR", src: "agent" },
     ],
   },
-  "compilance.log": {
+  "compliance.log": {
     entries: [
-      { ts: "2026-01-01T00:00:09.000Z", level: "INFO", msg: "compilance: checking standards", pipeline: "test-pipeline-id", stage: "compilance", src: "agent" },
+      { ts: "2026-01-01T00:00:09.000Z", level: "INFO", msg: "compliance: checking standards", pipeline: "test-pipeline-id", stage: "compliance", src: "agent" },
     ],
   },
   "PR writer.log": {
@@ -238,7 +238,7 @@ test.describe("Pipeline detail — log tab content per stage", () => {
     await expect(tabs.nth(5)).toHaveText("RED");
     await expect(tabs.nth(6)).toHaveText("GREEN");
     await expect(tabs.nth(7)).toHaveText("REFRACTOR");
-    await expect(tabs.nth(8)).toHaveText("compilance");
+    await expect(tabs.nth(8)).toHaveText("compliance");
     await expect(tabs.nth(9)).toHaveText("PR writer");
 
     // ── Tab 2: orchestrator (click to make active) ──────────────────────
@@ -278,10 +278,10 @@ test.describe("Pipeline detail — log tab content per stage", () => {
     await page.waitForTimeout(500);
     await expect(page.getByText("REFRACTOR: cleaning up")).toBeVisible();
 
-    // ── Tab 8: compilance ───────────────────────────────────────────────
+    // ── Tab 8: compliance ───────────────────────────────────────────────
     await tabs.nth(8).click();
     await page.waitForTimeout(500);
-    await expect(page.getByText("compilance: checking standards")).toBeVisible();
+    await expect(page.getByText("compliance: checking standards")).toBeVisible();
 
     // ── Tab 9: PR writer (empty log file) ───────────────────────────────
     await tabs.nth(9).click();
@@ -422,7 +422,7 @@ const MOCK_PIPELINE_INIT = {
     { id: 2, name: "RED", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 3, name: "GREEN", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 4, name: "REFRACTOR", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
-    { id: 5, name: "compilance", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
+    { id: 5, name: "compliance", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
     { id: 6, name: "PR writer", status: "pending", output: null, retry_count: 0, started_at: null, finished_at: null },
   ],
 };
@@ -503,7 +503,7 @@ test.describe("Pipeline detail — init stage logs", () => {
     await expect(tabs.nth(5)).toHaveText("RED");
     await expect(tabs.nth(6)).toHaveText("GREEN");
     await expect(tabs.nth(7)).toHaveText("REFRACTOR");
-    await expect(tabs.nth(8)).toHaveText("compilance");
+    await expect(tabs.nth(8)).toHaveText("compliance");
     await expect(tabs.nth(9)).toHaveText("PR writer");
 
     // ── Click orchestrator tab — verify UID entries ────────────────────

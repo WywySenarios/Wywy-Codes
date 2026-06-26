@@ -29,7 +29,7 @@ EXPECTED_STAGE_ORDER = [
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 ]
 
@@ -147,7 +147,7 @@ class TestResilience:
         pipeline_running.save(update_fields=["current_stage", "updated_at"])
 
         # Remove the following stage row so recursion would normally crash.
-        # current_stage=GREEN → next=REFRACTOR → following=compilance
+        # current_stage=GREEN → next=REFRACTOR → following=compliance
         pipeline_running.stages.filter(name=orchestrator.STAGE_ORDER[3]).delete()
 
         # Provide state.json so validation for the completed stage passes.

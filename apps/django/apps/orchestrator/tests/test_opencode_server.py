@@ -28,7 +28,7 @@ EXPECTED_STAGE_ORDER = [
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 ]
 

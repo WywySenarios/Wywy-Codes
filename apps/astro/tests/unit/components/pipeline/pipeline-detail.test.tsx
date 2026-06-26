@@ -131,7 +131,7 @@ describe("PipelineDetail — stages section", () => {
   it("renders StageProgress progress dots with correct status titles", async () => {
     render(<PipelineDetail pipelineId="test-pipeline-id" />);
 
-    // StageProgress renders 6 dots: init, RED, GREEN, REFRACTOR, compilance, PR writer
+    // StageProgress renders 6 dots: init, RED, GREEN, REFRACTOR, compliance, PR writer
     // The 3 stages from the API each have a known status
     // init is completed, RED is running, GREEN is pending
     expect(await screen.findByTitle("init: completed")).toBeTruthy();
@@ -139,7 +139,7 @@ describe("PipelineDetail — stages section", () => {
     expect(screen.getByTitle("GREEN: pending")).toBeTruthy();
     // Stages not present in the API default to "pending"
     expect(screen.getByTitle("REFRACTOR: pending")).toBeTruthy();
-    expect(screen.getByTitle("compilance: pending")).toBeTruthy();
+    expect(screen.getByTitle("compliance: pending")).toBeTruthy();
     expect(screen.getByTitle("PR writer: pending")).toBeTruthy();
   });
 
@@ -224,7 +224,7 @@ describe("PipelineDetail — stages section", () => {
       { id: 2, name: "RED", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
       { id: 3, name: "GREEN", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
       { id: 4, name: "REFRACTOR", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
-      { id: 5, name: "compilance", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
+      { id: 5, name: "compliance", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
       { id: 6, name: "PR writer", status: "completed", output: null, retry_count: 0, started_at: null, finished_at: null },
     ];
     const pipelineCompleted = { ...mockPipeline, stages: allStages, status: "completed" };
@@ -245,7 +245,7 @@ describe("PipelineDetail — stages section", () => {
     expect(screen.getByTitle("RED: completed")).toBeTruthy();
     expect(screen.getByTitle("GREEN: completed")).toBeTruthy();
     expect(screen.getByTitle("REFRACTOR: completed")).toBeTruthy();
-    expect(screen.getByTitle("compilance: completed")).toBeTruthy();
+    expect(screen.getByTitle("compliance: completed")).toBeTruthy();
     expect(screen.getByTitle("PR writer: completed")).toBeTruthy();
   });
 });

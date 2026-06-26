@@ -290,7 +290,7 @@ class TestValidSources:
             "RED",
             "GREEN",
             "REFRACTOR",
-            "compilance",
+            "compliance",
             "PR writer",
             "testing",
         })

@@ -28,7 +28,7 @@ VALID_SOURCES: frozenset[str] = frozenset({
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
     "testing",
 })

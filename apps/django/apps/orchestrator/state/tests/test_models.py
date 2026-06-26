@@ -21,7 +21,7 @@ EXPECTED_STAGE_NAMES = (
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 )
 

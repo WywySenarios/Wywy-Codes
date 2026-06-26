@@ -38,7 +38,7 @@ def pipeline_running(db) -> Pipeline:
         "RED",
         "GREEN",
         "REFRACTOR",
-        "compilance",
+        "compliance",
         "PR writer",
     ]
     for name in stage_names:
@@ -74,7 +74,7 @@ def pipeline_blocked_with_session(db) -> Pipeline:
         "RED",
         "GREEN",
         "REFRACTOR",
-        "compilance",
+        "compliance",
         "PR writer",
     ]
     for name in stage_names:
@@ -102,7 +102,7 @@ def pipeline_blocked_wo_session(db) -> Pipeline:
         "RED",
         "GREEN",
         "REFRACTOR",
-        "compilance",
+        "compliance",
         "PR writer",
     ]
     for name in stage_names:

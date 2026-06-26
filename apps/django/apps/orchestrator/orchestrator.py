@@ -52,7 +52,7 @@ STAGE_ORDER: list[str] = [
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 ]
 

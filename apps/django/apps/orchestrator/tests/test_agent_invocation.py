@@ -23,8 +23,8 @@ STAGE_INVOCATION_PARAMS = [
     ("RED",          "init",        ["init"]),
     ("GREEN",        "RED",         ["init", "RED"]),
     ("REFRACTOR",    "GREEN",       ["init", "RED", "GREEN"]),
-    ("compilance",   "REFRACTOR",   ["init", "RED", "GREEN", "REFRACTOR"]),
-    ("PR writer",   "compilance",  ["init", "RED", "GREEN", "REFRACTOR", "compilance"]),
+    ("compliance",   "REFRACTOR",   ["init", "RED", "GREEN", "REFRACTOR"]),
+    ("PR writer",   "compliance",  ["init", "RED", "GREEN", "REFRACTOR", "compliance"]),
 ]
 
 EXPECTED_STAGE_ORDER = [
@@ -32,7 +32,7 @@ EXPECTED_STAGE_ORDER = [
     "RED",
     "GREEN",
     "REFRACTOR",
-    "compilance",
+    "compliance",
     "PR writer",
 ]
 

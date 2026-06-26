@@ -201,6 +201,6 @@ STAGE_MODEL_MAP: dict[str, dict[str, str]] = {
     "RED":        {"model": "deepseek/deepseek-chat"},
     "GREEN":      {"model": "deepseek/deepseek-chat"},
     "REFRACTOR":  {"model": "anthropic/claude-sonnet-4-5"},
-    "compilance": {"model": "anthropic/claude-haiku-4-5"},
+    "compliance": {"model": "anthropic/claude-haiku-4-5"},
     "PR writer":  {"model": "anthropic/claude-sonnet-4-5"},
 }
