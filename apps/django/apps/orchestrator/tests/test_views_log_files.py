@@ -212,6 +212,100 @@ class TestLogFilesEntries:
         response = client.post(self.url(pipeline_queued, "orchestrator.log"))
         assert response.status_code == 405
 
+    # ── Opencode message transformation ──────────────────────────────
+
+    def test_transforms_opencode_messages_into_readable_entries(
+        self, client, db, pipeline_queued, temp_log_root,
+    ):
+        """Stage logs written as opencode session message objects (with
+        ``info`` and ``parts`` keys) must be transformed into entries with
+        ``ts``, ``level``, and ``msg`` fields that the LogViewer can render.
+
+        Without this transformation the LogViewer shows blank entries because
+        the raw message objects lack the expected ``ts``/``level``/``msg`` keys.
+        """
+        log_dir = temp_log_root / str(pipeline_queued.id)
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Simulate the format produced by _write_log_file in orchestrator.py
+        messages = [
+            {
+                "info": {
+                    "id": "msg_f017c7d4a001UYnZapU7Vit8tN",
+                    "sessionID": "ses_0fe838536ffeUpxkt30zIfdb9h",
+                    "role": "user",
+                    "time": {"created": 1782436363594},
+                },
+                "parts": [
+                    {
+                        "id": "prt_f017c7d50001oEiffypLWEIJAL",
+                        "type": "text",
+                        "text": "Stage: init. Write to /workspace/state/state.json to report your progress.",
+                    },
+                ],
+            },
+            {
+                "info": {
+                    "id": "msg_f017c7d65001a3qbUNWVHUizWR",
+                    "sessionID": "ses_0fe838536ffeUpxkt30zIfdb9h",
+                    "role": "assistant",
+                    "time": {"created": 1782436363621, "completed": 1782436365791},
+                    "model": {"providerID": "opencode", "modelID": "big-pickle"},
+                },
+                "parts": [
+                    {
+                        "id": "prt_f017c82c80017F3TACSdDc6R7c",
+                        "type": "reasoning",
+                        "text": "The user wants me to write a state file to report progress.",
+                    },
+                    {
+                        "id": "prt_f017c84400013rU4dnwJW2nA8a",
+                        "type": "text",
+                        "text": "The init stage has been completed successfully.",
+                    },
+                ],
+            },
+        ]
+        (log_dir / "init.log").write_text(json.dumps(messages, indent=2))
+
+        response = client.get(self.url(pipeline_queued, "init.log"))
+        assert response.status_code == 200
+        entries = response.json()["entries"]
+
+        # Must have at least one entry per message
+        assert len(entries) >= 2, (
+            f"Expected at least 2 entries, got {len(entries)}. "
+            "Hint: opencode message objects must be transformed into "
+            "LogEntry-compatible dicts with ts/level/msg keys."
+        )
+
+        # Each entry must have the three fields the LogViewer depends on
+        for i, entry in enumerate(entries):
+            assert "ts" in entry, f"Entry {i} missing 'ts': {entry}"
+            assert "level" in entry, f"Entry {i} missing 'level': {entry}"
+            assert "msg" in entry, f"Entry {i} missing 'msg': {entry}"
+
+        # First entry = user message
+        assert entries[0]["level"] == "USER", (
+            f"Expected level='USER' for user message, got '{entries[0]['level']}'"
+        )
+        assert "Stage: init" in entries[0]["msg"], (
+            f"User message should contain the stage prompt, got: {entries[0]['msg']}"
+        )
+
+        # Second entry = agent response
+        assert entries[1]["level"] == "AGENT", (
+            f"Expected level='AGENT' for assistant message, got '{entries[1]['level']}'"
+        )
+        assert "completed successfully" in entries[1]["msg"], (
+            f"Agent message should contain the response text, got: {entries[1]['msg']}"
+        )
+
+        # Timestamps should be ISO-format strings
+        assert "T" in entries[0]["ts"], (
+            f"Expected ISO timestamp, got: {entries[0]['ts']}"
+        )
+
 
 class TestLogFilesRaw:
     """GET /api/pipelines/<id>/logs/entries/<filename>/?raw — raw text dump."""

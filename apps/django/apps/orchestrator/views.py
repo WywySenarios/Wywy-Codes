@@ -421,6 +421,58 @@ def _ts_key(entry: dict) -> str:
     return entry.get("ts", "")
 
 
+def _conversation_to_log_entries(entries: list[dict]) -> list[dict]:
+    """Transform opencode session messages into LogEntry-compatible dicts.
+
+    Opencode log files produced by ``_write_log_file`` contain a JSON array
+    of message objects with ``info`` and ``parts`` keys.  The frontend's
+    ``LogViewer`` expects ``ts``, ``level``, ``msg`` — this function bridges
+    that gap.
+
+    When *entries* do not look like an opencode conversation (the first entry
+    lacks both ``info`` and ``parts`` keys), they are returned unchanged.
+    """
+    if (
+        not entries
+        or not isinstance(entries[0], dict)
+        or "info" not in entries[0]
+        or "parts" not in entries[0]
+    ):
+        return entries
+
+    _ROLE_LEVELS = {"assistant": "AGENT", "user": "USER"}
+    result: list[dict] = []
+    for msg in entries:
+        info = msg.get("info", {})
+        role = info.get("role", "unknown")
+        level = _ROLE_LEVELS.get(role, role.upper())
+
+        # Convert milliseconds timestamp to ISO string
+        created_millis = info.get("time", {}).get("created")
+        if created_millis:
+            ts = datetime.fromtimestamp(
+                created_millis / 1000, tz=timezone.utc
+            ).isoformat()
+        else:
+            ts = datetime.now(timezone.utc).isoformat()
+
+        # Concatenate all parts into a single readable message
+        parts_text: list[str] = []
+        for part in msg.get("parts", []):
+            text = part.get("text") or part.get("content") or ""
+            if text:
+                parts_text.append(text)
+        msg_text = "\n".join(parts_text)
+
+        result.append({
+            "ts": ts,
+            "level": level,
+            "msg": msg_text,
+        })
+
+    return result
+
+
 def api_log_files(request: HttpRequest, pipeline_id: str) -> HttpResponse:
     """List available log files for a pipeline."""
     if request.method != "GET":
@@ -456,7 +508,8 @@ def api_log_entries(request: HttpRequest, pipeline_id: str, log_filename: str) -
         return JsonResponse({"error": "lines parameter must be an integer"}, status=400)
 
     content = log_file.read_text()
-    return JsonResponse({"entries": _parse_log_entries(content, max_lines)})
+    entries = _parse_log_entries(content, max_lines)
+    return JsonResponse({"entries": _conversation_to_log_entries(entries)})
 
 
 # ── Stage-aware structured logs ──────────────────────────────────────── #
