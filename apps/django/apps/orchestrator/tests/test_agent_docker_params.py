@@ -110,7 +110,7 @@ class TestOpencodeServerDockerParams:
                 assert vol.get("mode") == "rw"
 
         vol_binds = {v.get("bind"): v for v in volumes.values() if "bind" in v}
-        for mount in ("/state", "/artifacts", "/context", "/logs"):
+        for mount in ("/workspace/state", "/artifacts", "/context", "/logs"):
             assert mount in vol_binds, f"Missing volume {mount}"
             assert vol_binds[mount].get("mode") == "rw"
 

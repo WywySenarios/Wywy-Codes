@@ -1343,7 +1343,7 @@ def _start_opencode_server(pipeline: Pipeline) -> None:
         if repo_path.exists():
             volumes[str(repo_path)] = {"bind": repo["mount"], "mode": "rw"}
     volumes.update({
-        str(workspace / "state"): {"bind": "/state", "mode": "rw"},
+        str(workspace / "state"): {"bind": "/workspace/state", "mode": "rw"},
         str(workspace / "artifacts"): {"bind": "/artifacts", "mode": "rw"},
         str(workspace / "context"): {"bind": "/context", "mode": "rw"},
         str(log_dir): {"bind": "/logs", "mode": "rw"},
@@ -1452,7 +1452,7 @@ def _run_stage_via_server(pipeline: Pipeline, stage: PipelineStage) -> tuple[int
                     "type": "text",
                     "text": (
                         f"Stage: {stage.name}. "
-                        f"Write to /state/state.json to report your progress. "
+                        f"Write to /workspace/state/state.json to report your progress. "
                         f"Set stages.{stage.name}.status to 'completed' when done."
                     ),
                 }

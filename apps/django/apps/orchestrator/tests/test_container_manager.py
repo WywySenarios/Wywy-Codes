@@ -178,7 +178,7 @@ def test_start_container_includes_correct_volumes(
 
     # ── Fixed volumes ───────────────────────────────────────────
     vol_binds = {v["bind"]: v for v in volumes.values()}
-    for mount in ("/state", "/artifacts", "/context", "/logs"):
+    for mount in ("/workspace/state", "/artifacts", "/context", "/logs"):
         assert mount in vol_binds, f"Missing volume for {mount}"
         assert vol_binds[mount]["mode"] == "rw"
 

@@ -98,6 +98,81 @@ def _write_stage_state(
     tmp_path.rename(state_path)
 
 
+def _setup_pipeline_and_mocks(
+    db: None,
+    temp_workspace: Path,
+    temp_log_root: Path,
+    monkeypatch: MonkeyPatch,
+    stage_name: str = "RED",
+) -> tuple[Pipeline, PipelineStage]:
+    """Create a pipeline, workspace, and state.json with all stages
+    ``"pending"``.  Marks the ``init`` stage as completed so that
+    ``stage_name`` can be advanced to immediately.
+
+    Also mocks the low-level HTTP calls so ``_run_stage_via_server``
+    can execute without a real opencode server container.
+
+    Returns (pipeline, target_stage).
+    """
+    pipeline = Pipeline.objects.create(
+        invocation_name="setup-pipeline",
+        description="Test setup",
+        status="running",
+    )
+    orchestrator._create_stages(pipeline)
+
+    # Create workspace structure manually — avoids real file-copy.
+    workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
+    state_dir = workspace / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
+    state = {
+        "pipeline_id": str(pipeline.id),
+        "status": "running",
+        "current_stage": None,
+        "stages": {
+            name: {"status": "pending", "output": None}
+            for name in orchestrator.STAGE_ORDER
+        },
+        "updated_at": "2025-01-01T00:00:00",
+    }
+    (state_dir / "state.json").write_text(json.dumps(state, indent=2))
+
+    # Mark ``init`` as completed so advance_pipeline targets the
+    # requested stage.
+    init_stage = pipeline.stages.get(name="init")
+    init_stage.status = "completed"
+    init_stage.save(update_fields=["status"])
+    pipeline.current_stage = "init"
+    pipeline.save(update_fields=["current_stage", "updated_at"])
+
+    target = pipeline.stages.get(name=stage_name)
+
+    # Mock low-level HTTP calls so ``_run_stage_via_server`` can
+    # execute without a real opencode server container.
+    monkeypatch.setattr(
+        orchestrator, "_get_server_url", lambda p: "http://server:4096",
+    )
+    monkeypatch.setattr(
+        orchestrator, "_stop_opencode_server", lambda p: None,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_create_pr", lambda p: None,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_teardown_workspace", lambda p: None,
+    )
+    monkeypatch.setattr(
+        orchestrator, "_run_formatters", lambda p: None,
+    )
+
+    # Shorten poll timeout so tests don't block for the production
+    # default (600 s) when no agent writes to state.json.
+    monkeypatch.setattr(orchestrator, "STATE_POLL_TIMEOUT", 3)
+
+    return pipeline, target
+
+
 class TestRunStageUsesServerNotDocker:
     """When advance_pipeline runs through all 9 stages, _spawn_agent_container
     is never called.  Instead, each stage creates an opencode session and
@@ -588,65 +663,11 @@ class TestAsyncAgentCompletionGap:
         ``"pending"``.  Marks the ``init`` stage as completed so that
         ``stage_name`` can be advanced to immediately.
 
-        Returns (pipeline, target_stage).
+        Delegates to the module-level :func:`_setup_pipeline_and_mocks`.
         """
-        pipeline = Pipeline.objects.create(
-            invocation_name="async-gap-test",
-            description="Expose async communication gap",
-            status="running",
+        return _setup_pipeline_and_mocks(
+            db, temp_workspace, temp_log_root, monkeypatch, stage_name,
         )
-        orchestrator._create_stages(pipeline)
-
-        # Create workspace structure manually — avoids real file-copy.
-        workspace = Path(settings.WORKSPACE_ROOT) / str(pipeline.id)
-        state_dir = workspace / "state"
-        state_dir.mkdir(parents=True, exist_ok=True)
-
-        state = {
-            "pipeline_id": str(pipeline.id),
-            "status": "running",
-            "current_stage": None,
-            "stages": {
-                name: {"status": "pending", "output": None}
-                for name in orchestrator.STAGE_ORDER
-            },
-            "updated_at": "2025-01-01T00:00:00",
-        }
-        (state_dir / "state.json").write_text(json.dumps(state, indent=2))
-
-        # Mark ``init`` as completed so advance_pipeline targets the
-        # requested stage.
-        init_stage = pipeline.stages.get(name="init")
-        init_stage.status = "completed"
-        init_stage.save(update_fields=["status"])
-        pipeline.current_stage = "init"
-        pipeline.save(update_fields=["current_stage", "updated_at"])
-
-        target = pipeline.stages.get(name=stage_name)
-
-        # Mock low-level HTTP calls so ``_run_stage_via_server`` can
-        # execute without a real opencode server container.
-        monkeypatch.setattr(
-            orchestrator, "_get_server_url", lambda p: "http://server:4096",
-        )
-        monkeypatch.setattr(
-            orchestrator, "_stop_opencode_server", lambda p: None,
-        )
-        monkeypatch.setattr(
-            orchestrator, "_create_pr", lambda p: None,
-        )
-        monkeypatch.setattr(
-            orchestrator, "_teardown_workspace", lambda p: None,
-        )
-        monkeypatch.setattr(
-            orchestrator, "_run_formatters", lambda p: None,
-        )
-
-        # Shorten poll timeout so tests don't block for the production
-        # default (600 s) when no agent writes to state.json.
-        monkeypatch.setattr(orchestrator, "STATE_POLL_TIMEOUT", 3)
-
-        return pipeline, target
 
     # ── Test 1: document the bug (passes now) ───────────────────────────
 
@@ -917,3 +938,58 @@ class TestAsyncAgentCompletionGap:
                 "The agent wrote 'completed' to state.json between ticks "
                 "but the orchestrator never re-validated."
             )
+
+
+class TestStagePromptUsesWorkspaceStateJson:
+    """The stage prompt sent to the opencode server must reference
+    ``/workspace/state/state.json`` so the ``read`` tool can access the
+    state file from within the workspace."""
+
+    def test_prompt_uses_workspace_state_json_path(
+        self,
+        db,
+        temp_workspace: Path,
+        temp_log_root: Path,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """Sending a stage prompt with ``/state/state.json`` causes the
+        opencode ``read`` tool to hang because the path is outside the
+        allowed workspace directory.  Every stage must instruct the agent
+        to use ``/workspace/state/state.json`` instead."""
+        pipeline, target = _setup_pipeline_and_mocks(
+            db, temp_workspace, temp_log_root, monkeypatch, stage_name="RED",
+        )
+
+        # ── Capture HTTP POST payloads ──────────────────────────────
+        http_posts: list[dict[str, Any]] = []
+
+        def mock_post(
+            pipeline: Pipeline, path: str, **kw: Any,
+        ) -> dict[str, Any]:
+            http_posts.append({"path": path, "kwargs": kw})
+            return {"id": f"session-{len(http_posts)}"}
+
+        def mock_get(
+            pipeline: Pipeline, path: str, **kw: Any,
+        ) -> dict[str, Any]:
+            return {}
+
+        monkeypatch.setattr(orchestrator, "_opencode_post", mock_post)
+        monkeypatch.setattr(orchestrator, "_opencode_get", mock_get)
+
+        # ── Act ─────────────────────────────────────────────────────
+        orchestrator._run_stage(pipeline, target)
+
+        # ── Assert ──────────────────────────────────────────────────
+        message_posts = [p for p in http_posts if "/message" in p["path"]]
+        assert len(message_posts) >= 1, (
+            "Expected at least one message POST to the opencode server"
+        )
+
+        parts = message_posts[0]["kwargs"].get("json", {}).get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts)
+        assert "/workspace/state/state.json" in text, (
+            f"Stage prompt must reference /workspace/state/state.json "
+            f"so the opencode read tool can access the state file.\n"
+            f"Got: {text}"
+        )

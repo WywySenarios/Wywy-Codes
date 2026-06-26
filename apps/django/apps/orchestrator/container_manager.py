@@ -47,7 +47,7 @@ class ContainerManager:
             repo_path = copies_dir / repo["mount"].lstrip("/")
             volumes[str(repo_path)] = {"bind": repo["mount"], "mode": "rw"}
         volumes.update({
-            str(workspace / "state"): {"bind": "/state", "mode": "rw"},
+            str(workspace / "state"): {"bind": "/workspace/state", "mode": "rw"},
             str(workspace / "artifacts"): {"bind": "/artifacts", "mode": "rw"},
             str(workspace / "context"): {"bind": "/context", "mode": "rw"},
             str(log_dir): {"bind": "/logs", "mode": "rw"},
